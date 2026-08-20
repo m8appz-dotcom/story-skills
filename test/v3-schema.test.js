@@ -332,6 +332,31 @@ describe("epistemic graph", () => {
     expect(() => recordKnowledge(created.root, { ...base, "learned-in": "chapter-99" })).toThrow("Unknown chapter: chapter-99");
   });
 
+  test("records a fact learned in a chapter that exists", () => {
+    const created = seedGraph("Learned In Chapter");
+    createEntity(created.root, { kind: "chapter", name: "One", number: 1 });
+
+    // Everything else here learns before the story opens. This is the path
+    // where the reference has to resolve against a chapter that is real, so it
+    // is the only one that reaches past the empty-canon shortcut.
+    recordKnowledge(created.root, {
+      character: "sarah-vane",
+      fact: "robert-killed-elizabeth",
+      status: "suspects",
+      "learned-in": "chapter-01",
+      confidence: "low"
+    });
+
+    const record = knowledgeReport(created.root, { character: "sarah-vane" }).records[0];
+    expect(record.facts).toHaveLength(1);
+    expect(record.facts[0]).toMatchObject({
+      fact: "robert-killed-elizabeth",
+      status: "suspects",
+      learnedIn: "chapter-01",
+      confidence: "low"
+    });
+  });
+
   test("rejects a learned-in chapter ahead of the accepted state", () => {
     const created = seedGraph("Future Knowledge");
     // chapter-02 exists as canon, but accepted state has only reached pre-story.
