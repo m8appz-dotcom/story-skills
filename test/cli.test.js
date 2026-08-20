@@ -83,7 +83,7 @@ describe("cli", () => {
     expect(invoke(cwd, ["links", root]).out).toContain("Links are valid");
     const report = invoke(cwd, ["report", root]);
     expect(report.out).toContain("# CLI Story");
-    expect(report.out).toContain("Schema version: 2");
+    expect(report.out).toContain("Schema version: 3");
     expect(report.out).toContain("- Total words: 2");
     expect(invoke(cwd, ["report", root, "--actionable"]).out).toContain("Next Actions:");
     expect(invoke(cwd, ["next", root]).out).toContain("Draft chapter 2");
