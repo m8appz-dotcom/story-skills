@@ -222,6 +222,55 @@ describe("v2 to v3 migration", () => {
     expect(checkProjectContinuity(created.root).ok).toBe(true);
   });
 
+  test("relocates recorded object state onto the latest chapter", () => {
+    const created = makeV2Project("Migrate Objects", [
+      "knowledge-state: []",
+      "object-state:",
+      "  - artifact: silver-key",
+      "    owner: jonas-reed",
+      "    location: the-mill-row",
+      "    status: hidden"
+    ].join("\n"));
+    createEntity(created.root, { kind: "character", name: "Jonas Reed", role: "protagonist" });
+    createEntity(created.root, { kind: "location", name: "The Mill Row", type: "settlement" });
+    createEntity(created.root, { kind: "artifact", name: "Silver Key", type: "object", status: "hidden" });
+    createEntity(created.root, { kind: "chapter", name: "One", number: 1 });
+
+    migrateProject(created.root);
+    const latest = scanProject(created.root).stateSnapshots.at(-1);
+
+    // The v2 rows were real data, so they land on the chapter they described.
+    expect(latest.objects).toEqual([
+      { id: "silver-key", owner: "jonas-reed", location: "the-mill-row", status: "hidden" }
+    ]);
+  });
+
+  test("collapses two legacy rows for the same character into one record", () => {
+    const created = makeV2Project("Migrate Two Rows", [
+      "knowledge-state:",
+      "  - character: jonas-reed",
+      "    knows: The mill was burned",
+      "    learned-in: pre-story",
+      "  - character: jonas-reed",
+      "    knows: The ledger names a name",
+      "    learned-in: pre-story",
+      "  - character: jonas-reed",
+      "    knows: The mill was burned"
+    ].join("\n"));
+    createEntity(created.root, { kind: "character", name: "Jonas Reed", role: "protagonist" });
+
+    migrateProject(created.root);
+    const project = scanProject(created.root);
+    const record = project.knowledge.find((item) => item.character === "jonas-reed");
+
+    // One record, one entry per fact: the repeated row is not tied twice.
+    expect(project.knowledge).toHaveLength(1);
+    expect(record.facts.map((entry) => entry.fact).sort()).toEqual([
+      "the-ledger-names-a-name",
+      "the-mill-was-burned"
+    ]);
+  });
+
   test("does not seed snapshots when chapter numbering has a gap", () => {
     const created = makeV2Project("Migrate Gap");
     createEntity(created.root, { kind: "chapter", name: "One", number: 1 });
@@ -325,6 +374,25 @@ describe("epistemic graph", () => {
       status: "unknown",
       "learned-in": "pre-story"
     })).toThrow("status unknown cannot record a learned-in chapter");
+  });
+
+  test("keeps a character's facts in a stable order as they are recorded", () => {
+    const created = seedGraph("Ordered Knowledge");
+    createEntity(created.root, { kind: "fact", name: "The rope was cut", "established-in": "pre-story" });
+
+    // Recorded out of order; the record keeps them sorted so a diff stays small.
+    recordKnowledge(created.root, {
+      character: "sarah-vane", fact: "the-rope-was-cut", status: "knows", "learned-in": "pre-story"
+    });
+    recordKnowledge(created.root, {
+      character: "sarah-vane", fact: "robert-killed-elizabeth", status: "suspects", "learned-in": "pre-story"
+    });
+
+    const record = scanProject(created.root).knowledge.find((item) => item.character === "sarah-vane");
+    expect(record.facts.map((entry) => entry.fact)).toEqual([
+      "robert-killed-elizabeth",
+      "the-rope-was-cut"
+    ]);
   });
 
   test("reports what a single character knows", () => {
