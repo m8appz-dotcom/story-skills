@@ -1125,13 +1125,11 @@ function readChapterNumbers(projectRoot) {
 }
 
 // Relocating recorded v2 state is not invention: the author wrote it.
+//
+// Both callers of the v3 scaffolding ensure `continuity/state.md` before
+// reaching here, so it is always present -- an empty one at worst.
 function legacyDurableState(projectRoot) {
-  const legacyPath = path.join(projectRoot, "continuity", "state.md");
-  if (!fs.existsSync(legacyPath)) {
-    return { characters: [], objects: [] };
-  }
-
-  const data = readMarkdown(legacyPath, projectRoot).data;
+  const data = readMarkdown(path.join(projectRoot, "continuity", "state.md"), projectRoot).data;
   const mappings = (value) => asArray(value)
     .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry));
 
@@ -1143,10 +1141,6 @@ function legacyDurableState(projectRoot) {
 
 function migrateKnowledgeState(projectRoot, changed) {
   const legacyPath = path.join(projectRoot, "continuity", "state.md");
-  if (!fs.existsSync(legacyPath)) {
-    return;
-  }
-
   const entries = asArray(readMarkdown(legacyPath, projectRoot).data["knowledge-state"])
     .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry))
     .filter((entry) => entry.character && entry.knows);

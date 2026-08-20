@@ -42,6 +42,9 @@ function seed(title) {
     createEntity(root, { kind: "question", name });
   }
   createEntity(root, { kind: "relationship", name: "Pair", character: ["sarah", "robert"] });
+  // A faction, so the owner checks that scan factions actually iterate one.
+  createEntity(root, { kind: "faction", name: "Harbor Watch", type: "government", member: "sarah" });
+  createEntity(root, { kind: "system", name: "Reciprocity", type: "custom" });
 
   return root;
 }

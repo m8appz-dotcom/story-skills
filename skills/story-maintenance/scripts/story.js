@@ -3230,11 +3230,7 @@ function readChapterNumbers(projectRoot) {
   }).filter((chapter) => Number.isInteger(chapter.number) && chapter.number > 0).sort((left, right) => left.number - right.number);
 }
 function legacyDurableState(projectRoot) {
-  const legacyPath = path8.join(projectRoot, "continuity", "state.md");
-  if (!fs2.existsSync(legacyPath)) {
-    return { characters: [], objects: [] };
-  }
-  const data = readMarkdown(legacyPath, projectRoot).data;
+  const data = readMarkdown(path8.join(projectRoot, "continuity", "state.md"), projectRoot).data;
   const mappings = (value) => asArray(value).filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry));
   return {
     characters: mappings(data["character-state"]).map(({ character, ...rest }) => ({ id: character, ...rest })),
@@ -3243,9 +3239,6 @@ function legacyDurableState(projectRoot) {
 }
 function migrateKnowledgeState(projectRoot, changed) {
   const legacyPath = path8.join(projectRoot, "continuity", "state.md");
-  if (!fs2.existsSync(legacyPath)) {
-    return;
-  }
   const entries = asArray(readMarkdown(legacyPath, projectRoot).data["knowledge-state"]).filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry)).filter((entry) => entry.character && entry.knows);
   const chapters = new Set(fs2.existsSync(path8.join(projectRoot, "chapters")) ? fs2.readdirSync(path8.join(projectRoot, "chapters")).filter((name) => name.endsWith(".md") && name !== "_index.md").map((name) => path8.basename(name, ".md")) : []);
   const resolves = (value) => {
