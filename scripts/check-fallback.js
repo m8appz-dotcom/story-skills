@@ -11,18 +11,18 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-skills-fallback-"))
 const generatedPath = path.join(tempDir, "story.js");
 
 try {
-  const build = spawnSync("bun", [
-    "build",
-    "./bin/story.js",
-    "--target=node",
-    `--outfile=${generatedPath}`
-  ], {
+  // Run through a shell so this works on Windows too, where `bun` resolves to a
+  // .cmd shim that spawnSync refuses to exec directly. Arguments are quoted
+  // rather than passed separately, which keeps paths with spaces intact.
+  const buildArgs = ["build", "./bin/story.js", "--target=node", `--outfile=${generatedPath}`];
+  const build = spawnSync(`bun ${buildArgs.map((arg) => JSON.stringify(arg)).join(" ")}`, {
     cwd: repoRoot,
-    encoding: "utf8"
+    encoding: "utf8",
+    shell: true
   });
 
   if (build.status !== 0) {
-    process.stderr.write(build.stderr || build.stdout);
+    process.stderr.write(build.stderr || build.stdout || `${build.error?.message ?? "bun build failed"}\n`);
     process.exit(build.status ?? 1);
   }
 

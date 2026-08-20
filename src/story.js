@@ -1,11 +1,52 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { checkContinuity } from "./continuity.js";
 import { parseFrontmatter, replaceFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 import { chapterProse, escapeRegExp, extractSection, kebabCase, titleCaseSlug, wordCount } from "./markdown.js";
+import {
+  assertLexicallyInsideRoot,
+  assertSafeProjectDirectory,
+  assertSafeProjectPath,
+  readMarkdown,
+  safeRead,
+  writeFile
+} from "./project-io.js";
+import { CONFIDENCE_LEVELS, EPISTEMIC_STATUSES, PRE_STORY, checkEpistemicGraph } from "./epistemic.js";
+import { checkRelationships } from "./relationships.js";
+import { projectContext } from "./projection.js";
+import { checkArcs, checkCausalChains } from "./arcs.js";
+import { buildArcSimulation } from "./arc-simulation.js";
+import { buildRenderPacket } from "./render-packet.js";
+import { analyzeProse } from "./prose-diagnostics.js";
+import { checkTransactions, planAcceptance, planRejection } from "./transactions.js";
+import { checkStateSnapshots, resolveCurrentSnapshot } from "./state.js";
+import {
+  currentState,
+  factFile,
+  relationshipFile,
+  factIndex,
+  knowledgeFile,
+  knowledgeIndex,
+  relationshipIndex,
+  sealedArcPlan,
+  stateIndex,
+  stateSnapshot
+} from "./v3-templates.js";
 
-export const STORY_SCHEMA_VERSION = 2;
+export const STORY_SCHEMA_VERSION = 3;
+
+// Schema v2 projects stay valid. v3 directories activate progressively: a
+// project only gets v3 checks once the matching directories exist.
+const LEGACY_SCHEMA_VERSIONS = new Set([2]);
+
+const V3_DIRECTORIES = [
+  path.join("continuity", "facts"),
+  path.join("continuity", "knowledge"),
+  path.join("continuity", "relationships"),
+  path.join("continuity", "state")
+];
 
 const REQUIRED_PATHS = [
   "story.md",
@@ -39,6 +80,22 @@ const INDEX_SCHEMAS = [
   [path.join("continuity", "questions", "_index.md"), "question-registry"],
   [path.join("continuity", "promises", "_index.md"), "promise-registry"],
   [path.join("glossary", "_index.md"), "glossary-registry"]
+];
+
+// Optional depth fields on a character. Absent by default; the schema supports
+// richer causality without making a short story painful to author.
+const CHARACTER_CAUSALITY_FIELDS = [
+  "external-goal",
+  "internal-need",
+  "fear",
+  "false-belief",
+  "private-information",
+  "dependencies",
+  "leverage",
+  "contradictions",
+  "stress-response",
+  "speech-principle",
+  "avoidance-pattern"
 ];
 
 const STORY_STATUSES = new Set(["planning", "drafting", "in-progress", "revising", "complete", "abandoned"]);
@@ -134,6 +191,11 @@ export function createStoryProject(options) {
   writeFile(path.join(root, "continuity", "promises", "_index.md"), promiseIndex(storyId, []), { root });
   writeFile(path.join(root, "glossary", "_index.md"), glossaryIndex(storyId, []), { root });
 
+  // A new project starts at schema v3, so it gets the v3 layout up front. The
+  // directories stay empty until the author uses them, which keeps a short story
+  // from having to reason about facts or knowledge at all.
+  migrateToV3(root, storyId, []);
+
   return { root, storyId, files: REQUIRED_PATHS.filter((entry) => entry.endsWith(".md")) };
 }
 
@@ -154,7 +216,12 @@ export function scanProject(root) {
       status: data.status ?? "",
       diedIn: data["died-in"] ?? "",
       relationships: asArray(data.relationships),
-      locations: asArray(data.locations)
+      locations: asArray(data.locations),
+      // Feature 13: optional character causality. Every field is opt-in so a
+      // lightweight story never has to fill any of them in.
+      causality: Object.fromEntries(CHARACTER_CAUSALITY_FIELDS
+        .filter((field) => data[field] !== undefined && data[field] !== "")
+        .map((field) => [field, data[field]]))
     })),
     locations: readEntityFiles(projectRoot, path.join("worldbuilding", "locations"), (id, file, data) => ({
       id,
@@ -188,14 +255,42 @@ export function scanProject(root) {
       owner: data.owner ?? "",
       location: data.location ?? ""
     })),
-    arcs: readEntityFiles(projectRoot, path.join("plot", "arcs"), (id, file, data) => ({
+    arcs: readEntityFiles(projectRoot, path.join("plot", "arcs"), (id, file, data, markdown) => ({
       id,
       file,
       name: data.name ?? titleCaseSlug(id),
       type: data.type ?? "",
       status: data.status ?? "",
       characters: asArray(data.characters),
-      themes: asArray(data.themes)
+      themes: asArray(data.themes),
+      // v3 arc plan. All optional: a v2 arc scans with empty plan fields.
+      chapters: asArray(data.chapters),
+      planVersion: Number(data["plan-version"] ?? 0),
+      sealedVersion: data["sealed-version"] ?? "",
+      dramaticObjective: data["dramatic-objective"] ?? "",
+      startingState: data["starting-state"] ?? "",
+      targetEndState: data["target-end-state"] ?? "",
+      hardConstraints: asArray(data["hard-constraints"]),
+      requiredSetups: asArray(data["required-setups"]),
+      requiredPayoffs: asArray(data["required-payoffs"]),
+      softPossibilities: asArray(data["soft-possibilities"]),
+      causalChain: asArray(data["causal-chain"]),
+      arcCharacters: asArray(data["arc-characters"]),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
+    })),
+    sealedArcs: readEntityFiles(projectRoot, path.join("plot", "arcs", "sealed"), (id, file, data) => ({
+      id,
+      file,
+      arc: data.arc ?? "",
+      version: Number(data["plan-version"] ?? 0),
+      chapters: asArray(data.chapters),
+      dramaticObjective: data["dramatic-objective"] ?? "",
+      hardConstraints: asArray(data["hard-constraints"]),
+      requiredSetups: asArray(data["required-setups"]),
+      requiredPayoffs: asArray(data["required-payoffs"]),
+      softPossibilities: asArray(data["soft-possibilities"]),
+      rawData: data
     })),
     chapters: readEntityFiles(projectRoot, "chapters", (id, file, data, markdown) => ({
       id,
@@ -209,7 +304,8 @@ export function scanProject(root) {
       locations: asArray(data.locations),
       arcsAdvanced: asArray(data["arcs-advanced"]),
       declaredWordCount: Number(data["word-count"] ?? 0),
-      wordCount: wordCount(chapterProse(markdown.body))
+      wordCount: wordCount(chapterProse(markdown.body)),
+      rawMarkdown: markdown.rawMarkdown
     })).sort((left, right) => left.number - right.number || left.file.localeCompare(right.file)),
     scenes: readEntityFiles(projectRoot, "scenes", (id, file, data) => ({
       id,
@@ -226,18 +322,30 @@ export function scanProject(root) {
       characters: asArray(data.characters),
       mentions: asArray(data.mentions),
       arcsAdvanced: asArray(data["arcs-advanced"]),
-      stateChanges: asArray(data["state-changes"])
+      stateChanges: asArray(data["state-changes"]),
+      // Feature 15: the scene contract. All optional, so v2 scenes keep working.
+      objective: data.objective ?? "",
+      opposition: data.opposition ?? "",
+      turn: data.turn ?? "",
+      exitConsequence: data["exit-consequence"] ?? "",
+      emotionalPressure: data["emotional-pressure"] ?? "",
+      hardConstraints: asArray(data["hard-constraints"]),
+      softBeats: asArray(data["soft-beats"]),
+      knowledgeChanges: asArray(data["knowledge-changes"]),
+      relationshipChanges: asArray(data["relationship-changes"])
     })).sort((left, right) => left.chapter.localeCompare(right.chapter) || left.scene - right.scene || left.file.localeCompare(right.file)),
-    questions: readEntityFiles(projectRoot, path.join("continuity", "questions"), (id, file, data) => ({
+    questions: readEntityFiles(projectRoot, path.join("continuity", "questions"), (id, file, data, markdown) => ({
       id,
       file,
       title: data.title ?? titleCaseSlug(id),
       status: data.status ?? "",
       introduced: data.introduced ?? "",
       resolved: data.resolved ?? "",
-      characters: asArray(data.characters)
+      characters: asArray(data.characters),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
     })),
-    promises: readEntityFiles(projectRoot, path.join("continuity", "promises"), (id, file, data) => ({
+    promises: readEntityFiles(projectRoot, path.join("continuity", "promises"), (id, file, data, markdown) => ({
       id,
       file,
       title: data.title ?? titleCaseSlug(id),
@@ -245,7 +353,9 @@ export function scanProject(root) {
       planted: data.planted ?? "",
       payoff: data.payoff ?? "",
       arcs: asArray(data.arcs),
-      characters: asArray(data.characters)
+      characters: asArray(data.characters),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
     })),
     glossaryTerms: readEntityFiles(projectRoot, path.join("glossary", "terms"), (id, file, data) => ({
       id,
@@ -254,6 +364,61 @@ export function scanProject(root) {
       category: data.category ?? "",
       aliases: asArray(data.aliases)
     })),
+    facts: readEntityFiles(projectRoot, path.join("continuity", "facts"), (id, file, data, markdown) => ({
+      id,
+      file,
+      declaredId: data.id ?? "",
+      statement: data.statement ?? "",
+      truthStatus: String(data["truth-status"] ?? ""),
+      establishedIn: data["established-in"] ?? "",
+      resolvedIn: data["resolved-in"] ?? "",
+      tags: asArray(data.tags),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
+    })),
+    knowledge: readEntityFiles(projectRoot, path.join("continuity", "knowledge"), (id, file, data, markdown) => ({
+      id,
+      file,
+      declaredCharacter: data.character ?? "",
+      character: data.character || id,
+      facts: asArray(data.facts),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
+    })),
+    relationships: readEntityFiles(projectRoot, path.join("continuity", "relationships"), (id, file, data) => ({
+      id,
+      file,
+      declaredId: data.id ?? "",
+      participants: asArray(data.participants),
+      state: asMapping(data.state),
+      publicStatus: data["public-status"] ?? "",
+      privateStatus: data["private-status"] ?? "",
+      lastMajorChange: data["last-major-change"] ?? "",
+      rawData: data
+    })),
+    // `current.md` is a generated pointer, not a snapshot, so it never enters
+    // the ordered history.
+    stateSnapshots: readEntityFiles(projectRoot, path.join("continuity", "state"), (id, file, data) => ({
+      id,
+      file,
+      chapter: data.chapter ?? "",
+      sequence: Number(data.sequence ?? 0),
+      provisional: String(data.provisional ?? "false") === "true",
+      storyTime: asMapping(data["story-time"]),
+      characters: asArray(data.characters),
+      objects: asArray(data.objects),
+      relationships: asArray(data.relationships),
+      activeThreads: asArray(data["active-threads"]),
+      readerKnowledge: asArray(data["reader-knowledge"]),
+      rawData: data
+    })).filter((snapshot) => snapshot.id !== "current")
+      .sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id)),
+    candidates: readCandidates(projectRoot),
+    transactions: readTransactions(projectRoot),
+    timeline: safeRead(path.join(projectRoot, "plot", "timeline.md"), projectRoot),
+    currentState: fs.existsSync(path.join(projectRoot, "continuity", "state", "current.md"))
+      ? readMarkdown(path.join(projectRoot, "continuity", "state", "current.md"), projectRoot)
+      : null,
     continuity: fs.existsSync(path.join(projectRoot, "continuity", "state.md"))
       ? readMarkdown(path.join(projectRoot, "continuity", "state.md"), projectRoot)
       : null
@@ -290,6 +455,7 @@ export function validateProject(root) {
   validateQuestions(project, errors);
   validatePromises(project, errors);
   validateGlossaryTerms(project, errors);
+  validateV3Structure(project, errors);
 
   const indexChecks = [
     [path.join("characters", "_index.md"), project.characters.map((item) => `](${item.id}.md)`)],
@@ -481,7 +647,22 @@ export function validateLinks(root) {
 }
 
 export function checkProjectContinuity(root) {
-  return checkContinuity(scanProject(root));
+  const project = scanProject(root);
+  return mergeChecks([
+    checkContinuity(project),
+    checkEpistemicGraph(project),
+    checkRelationships(project),
+    checkStateSnapshots(project),
+    checkTransactions(project),
+    checkArcs(project),
+    checkCausalChains(project)
+  ]);
+}
+
+function mergeChecks(results) {
+  const errors = results.flatMap((result) => result.errors);
+  const warnings = results.flatMap((result) => result.warnings);
+  return { ok: errors.length === 0, errors, warnings };
 }
 
 export function projectReport(root) {
@@ -682,8 +863,57 @@ export function reindexProject(root) {
   writeChanged(questionsIndexPath, questionIndex(project.storyId, project.questions), changed, project.root);
   writeChanged(promisesIndexPath, promiseIndex(project.storyId, project.promises), changed, project.root);
   writeChanged(glossaryIndexPath, glossaryIndex(project.storyId, project.glossaryTerms), changed, project.root);
+  reindexV3(project, changed);
 
   return { changed };
+}
+
+// v3 registries are rebuilt only when the project has activated the matching
+// directory, so v2 projects reindex exactly as before.
+function reindexV3(project, changed) {
+  const factsDir = path.join(project.root, "continuity", "facts");
+  const knowledgeDir = path.join(project.root, "continuity", "knowledge");
+  const relationshipsDir = path.join(project.root, "continuity", "relationships");
+  const stateDir = path.join(project.root, "continuity", "state");
+
+  if (fs.existsSync(factsDir)) {
+    writeChanged(path.join(factsDir, "_index.md"), factIndex(project.storyId, project.facts), changed, project.root);
+  }
+
+  if (fs.existsSync(knowledgeDir)) {
+    writeChanged(path.join(knowledgeDir, "_index.md"), knowledgeIndex(project.storyId, project.knowledge), changed, project.root);
+  }
+
+  if (fs.existsSync(relationshipsDir)) {
+    writeChanged(path.join(relationshipsDir, "_index.md"), relationshipIndex(project.storyId, project.relationships), changed, project.root);
+  }
+
+  if (fs.existsSync(stateDir)) {
+    writeChanged(path.join(stateDir, "_index.md"), stateIndex(project.storyId, project.stateSnapshots), changed, project.root);
+    writeChanged(path.join(stateDir, "current.md"), currentState(project.storyId, resolveCurrentSnapshot(project)), changed, project.root);
+    syncLegacyStatePointer(project, changed);
+  }
+}
+
+// Once a project has v3 snapshots they are the source of truth for how far the
+// story has advanced. The v2 `continuity/state.md` keeps working for v2 tooling,
+// so its `current-chapter` is mirrored from the latest snapshot rather than left
+// to drift. Only that one field is touched; hand-written v2 state is preserved.
+function syncLegacyStatePointer(project, changed) {
+  const latest = resolveCurrentSnapshot(project);
+  if (!project.continuity || !latest) {
+    return;
+  }
+
+  if (project.continuity.data["current-chapter"] === latest.sequence) {
+    return;
+  }
+
+  const statePath = path.join(project.root, "continuity", "state.md");
+  writeChanged(statePath, replaceFrontmatter(project.continuity.rawMarkdown, {
+    ...project.continuity.data,
+    "current-chapter": latest.sequence
+  }), changed, project.root);
 }
 
 export function computeWordCounts(root, options = {}) {
@@ -793,8 +1023,668 @@ export function migrateProject(root) {
     changed.push(storyPath);
   }
 
+  migrateToV3(projectRoot, storyId, changed);
+
   const reindexed = reindexProject(projectRoot);
   return { root: projectRoot, changed: changed.concat(reindexed.changed) };
+}
+
+// Schema v2 -> v3. Creates the v3 directories, seeds the pre-story snapshot, and
+// lifts v2 `knowledge-state` rows into fact + knowledge records. It never invents
+// creative content: every derived fact keeps the author's own wording and is
+// marked `undetermined` so a human decides its truth value.
+function migrateToV3(projectRoot, storyId, changed) {
+  for (const directory of V3_DIRECTORIES) {
+    ensureDirectory(path.join(projectRoot, directory), changed, projectRoot);
+  }
+
+  ensureFile(path.join(projectRoot, "continuity", "facts", "_index.md"), factIndex(storyId, []), changed, projectRoot);
+  ensureFile(path.join(projectRoot, "continuity", "knowledge", "_index.md"), knowledgeIndex(storyId, []), changed, projectRoot);
+  ensureFile(path.join(projectRoot, "continuity", "relationships", "_index.md"), relationshipIndex(storyId, []), changed, projectRoot);
+  // Seed the registry already listing the pre-story snapshot, so a freshly
+  // scaffolded project is byte-identical to what the next reindex would write.
+  const preStorySnapshot = { id: "chapter-00", sequence: 0, chapter: "" };
+  ensureFile(path.join(projectRoot, "continuity", "state", "_index.md"), stateIndex(storyId, [preStorySnapshot]), changed, projectRoot);
+  ensureFile(path.join(projectRoot, "continuity", "state", "chapter-00.md"), stateSnapshot(storyId, {
+    chapter: "",
+    sequence: 0,
+    note: "Durable state before chapter one opens. Seeded by migration; review and fill in."
+  }), changed, projectRoot);
+  // reindex regenerates this pointer, but init does not reindex, so seed it here.
+  ensureFile(path.join(projectRoot, "continuity", "state", "current.md"), currentState(storyId, {
+    id: "chapter-00",
+    chapter: "",
+    sequence: 0
+  }), changed, projectRoot);
+
+  migrateKnowledgeState(projectRoot, changed);
+  migrateChapterSnapshots(projectRoot, storyId, changed);
+}
+
+// A project migrating mid-draft already has canonical chapters but no state
+// history, and snapshot sequences must be gapless. Without a baseline the
+// acceptance flow is unreachable for exactly the authors who most need it.
+//
+// So seed one snapshot per existing chapter, marked `provisional` to record that
+// it was reconstructed at migration rather than captured at acceptance. Empty is
+// honest here: v2 never stored per-chapter state, and an empty provisional
+// snapshot says "unknown", which is the opposite of inventing one. The v2
+// durable state is real, recorded data, so it lands on the latest chapter.
+function migrateChapterSnapshots(projectRoot, storyId, changed) {
+  const chapters = readChapterNumbers(projectRoot);
+  if (chapters.length === 0) {
+    return;
+  }
+
+  // Only seed a contiguous run from chapter 1. A gap in chapter numbering would
+  // produce a gap in sequences, which is an error the author should fix first.
+  const contiguous = chapters.every((chapter, index) => chapter.number === index + 1);
+  if (!contiguous) {
+    return;
+  }
+
+  const legacy = legacyDurableState(projectRoot);
+  const latest = chapters[chapters.length - 1];
+
+  for (const chapter of chapters) {
+    const isLatest = chapter.id === latest.id;
+    ensureFile(path.join(projectRoot, "continuity", "state", `${chapter.id}.md`), stateSnapshot(storyId, {
+      chapter: chapter.id,
+      sequence: chapter.number,
+      provisional: true,
+      characters: isLatest ? legacy.characters : [],
+      objects: isLatest ? legacy.objects : [],
+      note: isLatest
+        ? "Provisional. Reconstructed at migration from continuity/state.md. Review before relying on it."
+        : "Provisional. v2 did not record per-chapter state, so this snapshot is intentionally empty."
+    }), changed, projectRoot);
+  }
+
+  writeChanged(path.join(projectRoot, "continuity", "state", "current.md"), currentState(storyId, {
+    id: latest.id,
+    chapter: latest.id,
+    sequence: latest.number
+  }), changed, projectRoot);
+}
+
+function readChapterNumbers(projectRoot) {
+  const directory = path.join(projectRoot, "chapters");
+  if (!fs.existsSync(directory)) {
+    return [];
+  }
+
+  return fs.readdirSync(directory)
+    .filter((name) => name.endsWith(".md") && name !== "_index.md")
+    .map((name) => {
+      const id = path.basename(name, ".md");
+      const data = readMarkdown(path.join(directory, name), projectRoot).data;
+      return { id, number: Number(data.number ?? chapterNumberFromFile(name) ?? 0) };
+    })
+    .filter((chapter) => Number.isInteger(chapter.number) && chapter.number > 0)
+    .sort((left, right) => left.number - right.number);
+}
+
+// Relocating recorded v2 state is not invention: the author wrote it.
+function legacyDurableState(projectRoot) {
+  const legacyPath = path.join(projectRoot, "continuity", "state.md");
+  if (!fs.existsSync(legacyPath)) {
+    return { characters: [], objects: [] };
+  }
+
+  const data = readMarkdown(legacyPath, projectRoot).data;
+  const mappings = (value) => asArray(value)
+    .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry));
+
+  return {
+    characters: mappings(data["character-state"]).map(({ character, ...rest }) => ({ id: character, ...rest })),
+    objects: mappings(data["object-state"]).map(({ artifact, ...rest }) => ({ id: artifact, ...rest }))
+  };
+}
+
+function migrateKnowledgeState(projectRoot, changed) {
+  const legacyPath = path.join(projectRoot, "continuity", "state.md");
+  if (!fs.existsSync(legacyPath)) {
+    return;
+  }
+
+  const entries = asArray(readMarkdown(legacyPath, projectRoot).data["knowledge-state"])
+    .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry))
+    .filter((entry) => entry.character && entry.knows);
+
+  // A v2 project may already contain a broken chapter reference. Copying it into
+  // two new files would turn one authoring mistake into three errors, two of them
+  // in files the author never wrote. Carry forward only what resolves, and say so
+  // where it does not.
+  const chapters = new Set(fs.existsSync(path.join(projectRoot, "chapters"))
+    ? fs.readdirSync(path.join(projectRoot, "chapters"))
+        .filter((name) => name.endsWith(".md") && name !== "_index.md")
+        .map((name) => path.basename(name, ".md"))
+    : []);
+
+  const resolves = (value) => {
+    const text = String(value ?? "").trim();
+    return text !== "" && (text === PRE_STORY || chapters.has(text));
+  };
+
+  const byCharacter = new Map();
+
+  for (const entry of entries) {
+    const factId = kebabCase(entry.knows);
+    if (!factId) {
+      continue;
+    }
+
+    const learnedIn = entry["learned-in"];
+    const carried = resolves(learnedIn);
+    const unresolved = Boolean(learnedIn) && !carried;
+
+    ensureFile(path.join(projectRoot, "continuity", "facts", `${factId}.md`), factFile(factId, {
+      statement: String(entry.knows),
+      truthStatus: "undetermined",
+      establishedIn: carried ? learnedIn : "",
+      tags: ["migrated", "needs-review"]
+    }), changed, projectRoot);
+
+    const record = byCharacter.get(entry.character) ?? [];
+    if (!record.some((item) => item.fact === factId)) {
+      record.push({
+        fact: factId,
+        status: "knows",
+        ...(carried ? { "learned-in": learnedIn } : {}),
+        ...(unresolved
+          ? { notes: `migration could not resolve learned-in ${learnedIn}; set it by hand` }
+          : {})
+      });
+    }
+    byCharacter.set(entry.character, record);
+  }
+
+  for (const [character, facts] of byCharacter) {
+    ensureFile(
+      path.join(projectRoot, "continuity", "knowledge", `${character}.md`),
+      knowledgeFile(character, facts),
+      changed,
+      projectRoot
+    );
+  }
+}
+
+// Upserts one epistemic entry into a character's knowledge record, creating the
+// record when it does not exist yet. Every reference is validated before the
+// write so a bad id can never land in canon.
+export function recordKnowledge(root, options) {
+  const project = scanProject(root);
+  const character = String(options.character ?? "").trim();
+  const fact = String(options.fact ?? "").trim();
+  const status = String(options.status ?? "").trim();
+
+  if (!character) {
+    throw new Error("--character is required");
+  }
+  if (!fact) {
+    throw new Error("--fact is required");
+  }
+  if (!EPISTEMIC_STATUSES.has(status)) {
+    throw new Error(`--status must be one of ${[...EPISTEMIC_STATUSES].join(", ")}`);
+  }
+  if (!project.characters.some((item) => item.id === character)) {
+    throw new Error(`Unknown character: ${character}`);
+  }
+  if (!project.facts.some((item) => item.id === fact)) {
+    throw new Error(`Unknown fact: ${fact}`);
+  }
+
+  const learnedIn = String(options["learned-in"] ?? "").trim();
+  if (learnedIn && learnedIn !== PRE_STORY && !project.chapters.some((item) => item.id === learnedIn)) {
+    throw new Error(`Unknown chapter: ${learnedIn}`);
+  }
+  if (status === "unknown" && learnedIn) {
+    throw new Error("status unknown cannot record a learned-in chapter");
+  }
+
+  const confidence = String(options.confidence ?? "").trim();
+  if (confidence && !CONFIDENCE_LEVELS.has(confidence)) {
+    throw new Error(`--confidence must be one of ${[...CONFIDENCE_LEVELS].join(", ")}`);
+  }
+
+  const entry = { fact, status };
+  if (learnedIn) {
+    entry["learned-in"] = learnedIn;
+  }
+  if (options.source) {
+    entry.source = String(options.source);
+  }
+  if (confidence) {
+    entry.confidence = confidence;
+  }
+  if (options.notes) {
+    entry.notes = String(options.notes);
+  }
+
+  const file = path.join(project.root, "continuity", "knowledge", `${character}.md`);
+  const existing = fs.existsSync(file) ? readMarkdown(file, project.root) : null;
+  const entries = existing ? asArray(existing.data.facts).filter((item) => item && item.fact !== fact) : [];
+  const facts = entries.concat([entry]).sort((left, right) => String(left.fact).localeCompare(String(right.fact)));
+
+  const markdown = existing
+    ? replaceFrontmatter(existing.rawMarkdown, { ...existing.data, facts })
+    : knowledgeFile(character, facts);
+
+  writeFile(file, markdown, { root: project.root });
+  const reindexed = reindexProject(project.root);
+  return { character, fact, status, file, changed: [file].concat(reindexed.changed) };
+}
+
+// Read-only projection of the accepted state history.
+export function stateReport(root, options = {}) {
+  const project = scanProject(root);
+  const requested = String(options.chapter ?? "").trim();
+  const snapshot = requested
+    ? project.stateSnapshots.find((item) => item.chapter === requested || item.id === requested)
+    : resolveCurrentSnapshot(project);
+
+  if (requested && !snapshot) {
+    throw new Error(`No state snapshot for ${requested}`);
+  }
+
+  const character = String(options.character ?? "").trim();
+  if (character && !project.characters.some((item) => item.id === character)) {
+    throw new Error(`Unknown character: ${character}`);
+  }
+
+  return {
+    root: project.root,
+    snapshot,
+    character,
+    // One snapshot answers "where are we". Across a book the question becomes
+    // "how did this person get here", which no single snapshot can answer.
+    trajectory: character ? characterTrajectory(project, character) : [],
+    history: project.stateSnapshots.map((item) => ({
+      id: item.id,
+      sequence: item.sequence,
+      chapter: item.chapter,
+      provisional: item.provisional
+    }))
+  };
+}
+
+// Only the snapshots where something about this character actually changed.
+function characterTrajectory(project, character) {
+  const steps = [];
+  let previous = null;
+
+  for (const snapshot of project.stateSnapshots) {
+    const entry = snapshot.characters.find((item) => item && item.id === character);
+    if (!entry) {
+      continue;
+    }
+
+    const { id, ...fields } = entry;
+    const changed = Object.entries(fields)
+      .filter(([key, value]) => value !== "" && (!previous || previous[key] !== value))
+      .map(([key, value]) => ({ field: key, value }));
+
+    if (changed.length > 0) {
+      steps.push({ chapter: snapshot.chapter || "pre-story", sequence: snapshot.sequence, changed });
+    }
+
+    previous = fields;
+  }
+
+  return steps;
+}
+
+export function knowledgeReport(root, options = {}) {
+  const project = scanProject(root);
+  const requested = String(options.character ?? "").trim();
+  const statements = new Map(project.facts.map((fact) => [fact.id, fact.statement]));
+
+  const records = project.knowledge
+    .filter((record) => !requested || record.character === requested)
+    .map((record) => ({
+      character: record.character,
+      facts: record.facts.map((entry) => ({
+        fact: entry.fact,
+        status: entry.status,
+        learnedIn: entry["learned-in"] ?? "",
+        confidence: entry.confidence ?? "",
+        statement: statements.get(entry.fact) ?? ""
+      }))
+    }));
+
+  if (requested && records.length === 0) {
+    throw new Error(`No knowledge record for ${requested}`);
+  }
+
+  return { root: project.root, records };
+}
+
+export function formatStateReport(report) {
+  const lines = [];
+
+  if (!report.snapshot) {
+    lines.push("No state snapshots yet.");
+    return `${lines.join("\n")}
+`;
+  }
+
+  const snapshot = report.snapshot;
+  lines.push(`State ${snapshot.id} (sequence ${snapshot.sequence}, chapter ${snapshot.chapter || "pre-story"})`);
+
+  // Provisional snapshots were reconstructed at migration, not captured at
+  // acceptance. Saying so keeps a reconstruction from being read as a record.
+  if (snapshot.provisional) {
+    lines.push("Provisional: reconstructed at migration, not captured at acceptance");
+  }
+
+  const time = Object.entries(snapshot.storyTime).filter(([, value]) => value !== "");
+  if (time.length > 0) {
+    lines.push(`Story time: ${time.map(([key, value]) => `${key} ${value}`).join(", ")}`);
+  }
+
+  appendStateSection(lines, "Characters", snapshot.characters);
+  appendStateSection(lines, "Objects", snapshot.objects);
+  appendStateSection(lines, "Relationships", snapshot.relationships);
+
+  if (snapshot.activeThreads.length > 0) {
+    lines.push(`Active threads: ${snapshot.activeThreads.join(", ")}`);
+  }
+
+  if (report.character) {
+    lines.push(`Trajectory of ${report.character}:`);
+    for (const step of report.trajectory) {
+      lines.push(`  ${step.chapter}: ${step.changed.map((item) => `${item.field}=${item.value}`).join(", ")}`);
+    }
+  }
+
+  const provisional = report.history.filter((item) => item.provisional).length;
+  lines.push(`History: ${report.history.length} snapshot(s)${provisional > 0 ? `, ${provisional} provisional` : ""}`);
+  return `${lines.join("\n")}
+`;
+}
+
+function appendStateSection(lines, title, entries) {
+  if (entries.length === 0) {
+    return;
+  }
+
+  lines.push(`${title}:`);
+  for (const entry of entries) {
+    const detail = Object.entries(entry)
+      .filter(([key, value]) => key !== "id" && value !== "")
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" ");
+    lines.push(`  ${entry.id}${detail ? ` ${detail}` : ""}`);
+  }
+}
+
+export function formatKnowledgeReport(report) {
+  if (report.records.length === 0) {
+    return "No knowledge records yet.\n";
+  }
+
+  const lines = [];
+  for (const record of report.records) {
+    lines.push(`${record.character}:`);
+    if (record.facts.length === 0) {
+      lines.push("  (no tracked facts)");
+      continue;
+    }
+    for (const entry of record.facts) {
+      const suffix = [entry.learnedIn && `learned-in ${entry.learnedIn}`, entry.confidence && `confidence ${entry.confidence}`]
+        .filter(Boolean)
+        .join(", ");
+      lines.push(`  ${entry.status.padEnd(11)} ${entry.fact}${suffix ? ` (${suffix})` : ""}`);
+    }
+  }
+
+  return `${lines.join("\n")}
+`;
+}
+
+// Phase B of the two-phase update. Every target is captured first, so a failure
+// part-way through restores the repository to exactly its previous state.
+function commitWrites(root, writes) {
+  const originals = writes.map((write) => ({
+    file: write.file,
+    existed: fs.existsSync(write.file),
+    contents: fs.existsSync(write.file) ? fs.readFileSync(write.file) : null
+  }));
+
+  const written = [];
+
+  try {
+    for (const write of writes) {
+      writeFile(write.file, write.contents, { root });
+      written.push(write.file);
+    }
+  } catch (error) {
+    for (const original of originals) {
+      if (!written.includes(original.file)) {
+        continue;
+      }
+      if (original.existed) {
+        fs.writeFileSync(original.file, original.contents);
+      } else {
+        fs.rmSync(original.file, { force: true });
+      }
+    }
+    throw error;
+  }
+
+  return written;
+}
+
+export function listCandidates(root, options = {}) {
+  const project = scanProject(root);
+  const chapter = String(options.chapter ?? "").trim();
+
+  return {
+    root: project.root,
+    candidates: project.candidates
+      .filter((candidate) => !chapter || candidate.chapter === chapter)
+      .map((candidate) => ({
+        id: candidate.id,
+        chapter: candidate.chapter,
+        status: candidate.status,
+        number: candidate.number,
+        pov: candidate.pov,
+        words: wordCount(candidate.body),
+        canonical: project.chapters.some((item) => item.id === candidate.chapter)
+      }))
+  };
+}
+
+// Phase A runs inside planAcceptance and throws before anything is staged.
+export function acceptCandidate(root, options = {}) {
+  const project = scanProject(root);
+  const plan = planAcceptance(project, { ...options, now: options.now });
+  const written = commitWrites(project.root, plan.writes);
+  const reindexed = reindexProject(project.root);
+
+  return {
+    chapter: plan.candidate.chapter,
+    candidate: plan.candidate.id,
+    bodyHash: plan.bodyHash,
+    stateBefore: plan.transaction["state-before"],
+    stateAfter: plan.transaction["state-after"],
+    changed: written.concat(reindexed.changed)
+  };
+}
+
+export function rejectCandidate(root, options = {}) {
+  const project = scanProject(root);
+  const plan = planRejection(project, options);
+  const written = commitWrites(project.root, plan.writes);
+
+  return {
+    chapter: plan.candidate.chapter,
+    candidate: plan.candidate.id,
+    changed: written
+  };
+}
+
+export function readTransactionRecord(root, options = {}) {
+  const project = scanProject(root);
+  const chapter = String(options.chapter ?? "").trim();
+  const transaction = project.transactions.find((item) => item.id === chapter);
+
+  if (!transaction) {
+    throw new Error(`No transaction for ${chapter || "(unset)"}`);
+  }
+
+  return transaction.data;
+}
+
+// Feature 5: sealing an arc plan. Sealed plans are never edited in place;
+// sealing again produces the next version, so a chapter plan can always name
+// the exact arc version it derives from.
+export function sealArc(root, options = {}) {
+  const project = scanProject(root);
+  const arcId = String(options.arc ?? "").trim();
+  const arc = project.arcs.find((item) => item.id === arcId);
+
+  if (!arc) {
+    throw new Error(`Unknown arc: ${arcId || "(unset)"}`);
+  }
+
+  const version = project.sealedArcs
+    .filter((plan) => plan.arc === arc.id)
+    .reduce((max, plan) => Math.max(max, plan.version), 0) + 1;
+
+  const id = `${arc.id}-v${version}`;
+  const file = path.join(project.root, "plot", "arcs", "sealed", `${id}.md`);
+
+  if (fs.existsSync(file)) {
+    throw new Error(`${relative(project, file)} already exists`);
+  }
+
+  const sourceHash = createHash("sha256").update(JSON.stringify(arc.rawData), "utf8").digest("hex");
+
+  const writes = [
+    { file, contents: sealedArcPlan(arc, version, { sourceHash, now: options.now }) },
+    {
+      file: arc.file,
+      contents: replaceFrontmatter(arc.rawMarkdown, {
+        ...arc.rawData,
+        "plan-version": version,
+        "sealed-version": id
+      })
+    }
+  ];
+
+  const written = commitWrites(project.root, writes);
+  const reindexed = reindexProject(project.root);
+
+  return { arc: arc.id, version, id, file, changed: written.concat(reindexed.changed) };
+}
+
+// Feature 3: the POV-safe context envelope, in machine-readable form.
+export function contextProjection(root, options = {}) {
+  return projectContext(scanProject(root), options);
+}
+
+export function formatContextProjection(projection) {
+  const newline = String.fromCharCode(10);
+  const lines = [
+    `Context ${projection.chapter} / POV ${projection.pov}`,
+    `Narrative: ${projection.narrative.pov}, ${projection.narrative.tense} tense`
+  ];
+
+  if (projection.location.id) {
+    lines.push(`Location: ${projection.location.name ?? projection.location.id}`);
+  }
+
+  for (const status of ["knows", "believes", "suspects", "doubts", "misbelieves"]) {
+    const entries = projection.knowledge[status] ?? [];
+    if (entries.length === 0) {
+      continue;
+    }
+    lines.push(`${status}:`);
+    for (const entry of entries) {
+      lines.push(`  ${entry.statement || entry.fact}${entry["learned-in"] ? ` (${entry["learned-in"]})` : ""}`);
+    }
+  }
+
+  if (projection.present.length > 0) {
+    lines.push(`Present: ${projection.present.map((item) => item.name).join(", ")}`);
+  }
+
+  if (projection.objects.length > 0) {
+    lines.push(`Objects: ${projection.objects.map((item) => item.name).join(", ")}`);
+  }
+
+  lines.push(`Withheld: ${projection.excluded.facts} fact(s) ${projection.excluded.reason}`);
+  return `${lines.join(newline)}${newline}`;
+}
+
+// Feature 22: prose diagnostics. Reported, never enforced: this deliberately
+// does not participate in validate, links, or continuity, and cannot fail a
+// check. Repetition is sometimes the point.
+export function proseDiagnostics(root, options = {}) {
+  const project = scanProject(root);
+  const requested = String(options.chapter ?? "").trim();
+
+  const chapters = project.chapters
+    .filter((chapter) => !requested || chapter.id === requested)
+    .map((chapter) => ({ id: chapter.id, text: chapterProse(parseFrontmatter(chapter.rawMarkdown, chapter.file).body) }));
+
+  if (requested && chapters.length === 0) {
+    throw new Error(`Unknown chapter: ${requested}`);
+  }
+
+  return analyzeProse(chapters, options);
+}
+
+// Feature 4: the deterministic brief a model simulates an arc from.
+export function arcSimulation(root, options = {}) {
+  const project = scanProject(root);
+  const brief = buildArcSimulation(project, options);
+
+  if (!options.write) {
+    return { brief, file: "" };
+  }
+
+  const file = path.join(project.root, "plot", "arcs", "simulations", `${brief.arc}-v${brief["plan-version"] || 1}.json`);
+  writeFile(file, `${JSON.stringify(brief, null, 2)}${String.fromCharCode(10)}`, { root: project.root });
+
+  return { brief, file };
+}
+
+// Feature 6: the compact, prose-facing packet. Written to the candidate
+// workspace so a chapter plan and its packet version live beside the drafts
+// they produced.
+export function renderPacket(root, options = {}) {
+  const project = scanProject(root);
+  const packet = buildRenderPacket(project, options);
+
+  if (!options.write) {
+    return { packet, file: "" };
+  }
+
+  const version = Number(options.version ?? 1);
+  const file = path.join(project.root, "work", "chapters", packet.chapter, `render-packet-v${version}.json`);
+  writeFile(file, `${JSON.stringify(packet, null, 2)}${String.fromCharCode(10)}`, { root: project.root });
+
+  return { packet, file };
+}
+
+export function createCandidate(root, options = {}) {
+  const project = scanProject(root);
+  const chapter = String(options.chapter ?? "").trim();
+  requireKebabId(chapter, "chapter id");
+
+  const number = Number(options.number ?? Number(String(chapter).replace(/[^0-9]/g, "")) ?? 0);
+  const existing = project.candidates.filter((candidate) => candidate.chapter === chapter);
+  const id = `candidate-${String(existing.length + 1).padStart(3, "0")}`;
+  const file = path.join(project.root, "work", "chapters", chapter, `${id}.md`);
+
+  if (fs.existsSync(file)) {
+    throw new Error(`${relative(project, file)} already exists`);
+  }
+
+  writeFile(file, candidateFile(chapter, id, number, options), { root: project.root });
+  return { chapter, candidate: id, file };
 }
 
 export function createEntity(root, options) {
@@ -1240,9 +2130,78 @@ function buildEntity(project, kind, name, options) {
       return entityResult(project, kind, id, promiseFile(name, options));
     case "term":
       return entityResult(project, kind, id, termFile(name, options));
+    case "fact":
+      return entityResult(project, kind, id, factFile(id, {
+        statement: name,
+        truthStatus: options["truth-status"],
+        establishedIn: options["established-in"],
+        resolvedIn: options["resolved-in"],
+        tags: normalizeList(options.tag, [])
+      }));
+    case "knowledge":
+      return entityResult(project, kind, id, knowledgeFile(id, []));
+    case "relationship":
+      return buildRelationship(project, kind, options);
     default:
       entityConfig(kind);
   }
+}
+
+// A relationship is identified by its participants, not by its display name, so
+// the same pair can never be filed twice under two different titles.
+function buildRelationship(project, kind, options) {
+  const participants = normalizeList(options.character, [])
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+
+  if (participants.length < 2) {
+    throw new Error("A relationship needs at least two --character values");
+  }
+
+  for (const participant of participants) {
+    requireKebabId(participant, "relationship participant");
+  }
+
+  const sorted = [...participants].sort();
+  return entityResult(project, kind, sorted.join("-"), relationshipFile(sorted.join("-"), sorted, {
+    publicStatus: options["public-status"],
+    privateStatus: options["private-status"],
+    lastMajorChange: options["last-major-change"]
+  }));
+}
+
+function candidateFile(chapter, id, number, options) {
+  return `${stringifyFrontmatter({
+    type: "chapter-candidate",
+    chapter,
+    candidate: id,
+    title: options.title ?? titleCaseSlug(chapter),
+    number,
+    status: "pending",
+    pov: options.pov ?? "",
+    "plan-version": options["plan-version"] ?? "",
+    "render-packet-version": options["render-packet-version"] ?? "",
+    review: "",
+    characters: normalizeList(options.character, []),
+    mentions: normalizeList(options.mention, []),
+    locations: normalizeList(options.location, []),
+    "arcs-advanced": normalizeList(options.arc, []),
+    "story-time": { date: "", time: "", elapsed: "" },
+    "state-characters": [],
+    "state-objects": [],
+    "state-relationships": [],
+    "knowledge-delta": [],
+    "promise-delta": [],
+    "question-delta": [],
+    "active-threads": [],
+    "reader-knowledge": []
+  })}# ${options.title ?? titleCaseSlug(chapter)}
+
+## Chapter Text
+
+Draft prose goes here. This file is a candidate, not canon: nothing in it
+affects story state until \`story accept\` commits it.
+`;
 }
 
 function entityResult(project, kind, id, markdown) {
@@ -1262,7 +2221,10 @@ function entityConfig(kind) {
     scene: { dir: "scenes", titleField: "title" },
     question: { dir: path.join("continuity", "questions"), titleField: "title" },
     promise: { dir: path.join("continuity", "promises"), titleField: "title" },
-    term: { dir: path.join("glossary", "terms"), titleField: "term" }
+    term: { dir: path.join("glossary", "terms"), titleField: "term" },
+    fact: { dir: path.join("continuity", "facts"), titleField: "statement" },
+    knowledge: { dir: path.join("continuity", "knowledge"), titleField: "character" },
+    relationship: { dir: path.join("continuity", "relationships"), titleField: "id" }
   };
   const config = configs[kind];
   if (!config) {
@@ -1917,6 +2879,94 @@ function xmlEscape(value) {
     .replace(/"/g, "&quot;");
 }
 
+// Candidates live outside canon in `work/chapters/<chapter>/`. Reading them is
+// deliberately separate from readEntityFiles: a candidate is not an entity, and
+// it must never be mistaken for one.
+function readCandidates(root) {
+  const workRoot = path.join(root, "work", "chapters");
+  if (!fs.existsSync(workRoot)) {
+    return [];
+  }
+
+  assertSafeProjectDirectory(workRoot, root);
+  const candidates = [];
+
+  for (const chapterDir of fs.readdirSync(workRoot, { withFileTypes: true })) {
+    if (!chapterDir.isDirectory()) {
+      continue;
+    }
+
+    const directory = path.join(workRoot, chapterDir.name);
+    assertSafeProjectDirectory(directory, root);
+
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) {
+        continue;
+      }
+
+      const file = path.join(directory, entry.name);
+      const markdown = readMarkdown(file, root);
+      if (markdown.data.type !== "chapter-candidate") {
+        continue;
+      }
+
+      const data = markdown.data;
+      candidates.push({
+        id: path.basename(entry.name, ".md"),
+        file,
+        chapter: data.chapter ?? chapterDir.name,
+        title: data.title ?? titleCaseSlug(chapterDir.name),
+        number: Number(data.number ?? chapterNumberFromFile(file) ?? 0),
+        status: data.status ?? "pending",
+        pov: data.pov ?? "",
+        review: data.review ?? "",
+        planVersion: data["plan-version"] ?? "",
+        renderPacketVersion: data["render-packet-version"] ?? "",
+        characters: asArray(data.characters),
+        mentions: asArray(data.mentions),
+        locations: asArray(data.locations),
+        arcsAdvanced: asArray(data["arcs-advanced"]),
+        storyTime: asMapping(data["story-time"]),
+        stateCharacters: asArray(data["state-characters"]),
+        stateObjects: asArray(data["state-objects"]),
+        stateRelationships: asArray(data["state-relationships"]),
+        knowledgeDelta: asArray(data["knowledge-delta"]),
+        promiseDelta: asArray(data["promise-delta"]),
+        questionDelta: asArray(data["question-delta"]),
+        activeThreads: asArray(data["active-threads"]),
+        readerKnowledge: asArray(data["reader-knowledge"]),
+        body: markdown.body,
+        rawData: data,
+        rawMarkdown: markdown.rawMarkdown
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function readTransactions(root) {
+  const directory = path.join(root, "transactions");
+  if (!fs.existsSync(directory)) {
+    return [];
+  }
+
+  assertSafeProjectDirectory(directory, root);
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => entry.name)
+    .sort()
+    .map((name) => {
+      const file = path.join(directory, name);
+      assertSafeProjectPath(file, root);
+      return {
+        id: path.basename(name, ".json"),
+        file,
+        data: JSON.parse(fs.readFileSync(file, "utf8"))
+      };
+    });
+}
+
 function readEntityFiles(root, relativeDir, mapEntity) {
   const directory = path.join(root, relativeDir);
   if (!fs.existsSync(directory)) {
@@ -1935,36 +2985,11 @@ function readEntityFiles(root, relativeDir, mapEntity) {
     });
 }
 
-function readMarkdown(filePath, root) {
-  if (root) {
-    assertSafeProjectPath(filePath, root);
-  }
-  const rawMarkdown = fs.readFileSync(filePath, "utf8");
-  const parsed = parseFrontmatter(rawMarkdown, filePath);
-  return { ...parsed, rawMarkdown };
-}
-
-function writeFile(filePath, contents, options = {}) {
-  const target = prepareWriteTarget(filePath, options.root);
-  fs.writeFileSync(target, contents, "utf8");
-}
-
 function writeChanged(filePath, contents, changed, root) {
   if (safeRead(filePath, root) !== contents) {
     writeFile(filePath, contents, { root });
     changed.push(filePath);
   }
-}
-
-function safeRead(filePath, root) {
-  if (!fs.existsSync(filePath)) {
-    return "";
-  }
-
-  if (root) {
-    assertSafeProjectPath(filePath, root);
-  }
-  return fs.readFileSync(filePath, "utf8");
 }
 
 function resolveOutputPath(project, out, defaultRelativePath, enforceRoot) {
@@ -1978,80 +3003,8 @@ function resolveOutputPath(project, out, defaultRelativePath, enforceRoot) {
   };
 }
 
-function prepareWriteTarget(filePath, root) {
-  const target = path.resolve(filePath);
-  if (root) {
-    assertLexicallyInsideRoot(target, root);
-  }
-
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-
-  if (root) {
-    assertSafeProjectParent(target, root);
-  }
-
-  rejectSymlinkTarget(target);
-  return target;
-}
-
-function assertSafeProjectPath(filePath, root) {
-  const target = path.resolve(filePath);
-  assertLexicallyInsideRoot(target, root);
-  assertSafeProjectParent(target, root);
-  rejectSymlinkTarget(target);
-}
-
-function assertSafeProjectDirectory(directory, root) {
-  const target = path.resolve(directory);
-  assertLexicallyInsideRoot(target, root);
-  const stats = lstatIfExists(target);
-
-  if (stats) {
-    if (stats.isSymbolicLink()) {
-      throw new Error(`Refusing to use symlinked project directory: ${target}`);
-    }
-
-    if (!stats.isDirectory()) {
-      throw new Error(`Project path is not a directory: ${target}`);
-    }
-  }
-
-  const rootReal = fs.realpathSync(path.resolve(root));
-  const directoryReal = fs.realpathSync(target);
-  if (!isPathInside(rootReal, directoryReal)) {
-    throw new Error(`Refusing to use project directory outside root: ${target}`);
-  }
-}
-
-function assertSafeProjectParent(filePath, root) {
-  const rootReal = fs.realpathSync(path.resolve(root));
-  const parentReal = fs.realpathSync(path.dirname(path.resolve(filePath)));
-  if (!isPathInside(rootReal, parentReal)) {
-    throw new Error(`Refusing to access project path outside root: ${filePath}`);
-  }
-}
-
-function assertLexicallyInsideRoot(filePath, root) {
-  const rootPath = path.resolve(root);
-  const target = path.resolve(filePath);
-  if (!isPathInside(rootPath, target)) {
-    throw new Error(`Refusing to access path outside project root: ${target}`);
-  }
-}
-
-function rejectSymlinkTarget(filePath) {
-  if (lstatIfExists(filePath)?.isSymbolicLink()) {
-    throw new Error(`Refusing to write through symlink: ${filePath}`);
-  }
-}
-
-function lstatIfExists(filePath) {
-  return fs.lstatSync(filePath, { throwIfNoEntry: false }) ?? null;
-}
-
-function isPathInside(root, target) {
-  const relativePath = path.relative(root, target);
-  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+function asMapping(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
 function asArray(value) {
@@ -2097,8 +3050,11 @@ function validateStoryFrontmatter(project, errors) {
   validateEnum(data, "status", STORY_STATUSES, "story.md", errors);
   validateEnum(data, "tense", STORY_TENSES, "story.md", errors);
 
-  if (data["schema-version"] !== undefined && data["schema-version"] !== STORY_SCHEMA_VERSION) {
-    errors.push(`story.md schema-version must be ${STORY_SCHEMA_VERSION}`);
+  const declaredVersion = data["schema-version"];
+  if (declaredVersion !== undefined
+    && declaredVersion !== STORY_SCHEMA_VERSION
+    && !LEGACY_SCHEMA_VERSIONS.has(declaredVersion)) {
+    errors.push(`story.md schema-version must be ${STORY_SCHEMA_VERSION} (legacy ${[...LEGACY_SCHEMA_VERSIONS].join(", ")} still accepted)`);
   }
 }
 
@@ -2356,6 +3312,57 @@ function validateGlossaryTerms(project, errors) {
     requireScalar(data, "category", label, errors);
     validateEnum(data, "category", TERM_CATEGORIES, label, errors);
     validateStringArray(data, "aliases", label, errors);
+  }
+}
+
+// Structural checks only: file type, required scalars, and shape. Referential
+// and ordering checks live in the epistemic/state/relationship modules and run
+// under `story continuity`.
+function validateV3Structure(project, errors) {
+  for (const fact of project.facts) {
+    const label = relative(project, fact.file);
+    validateEntityId(fact.id, label, errors);
+    requireFields(fact.rawData, ["statement"], label, errors);
+    requireScalar(fact.rawData, "statement", label, errors);
+    requireExactType(fact.rawData, "fact", label, errors);
+  }
+
+  for (const record of project.knowledge) {
+    const label = relative(project, record.file);
+    validateEntityId(record.id, label, errors);
+    requireFields(record.rawData, ["character", "facts"], label, errors);
+    requireScalar(record.rawData, "character", label, errors);
+    validateObjectArray(record.rawData, "facts", label, errors);
+    requireExactType(record.rawData, "knowledge-record", label, errors);
+  }
+
+  for (const relationship of project.relationships) {
+    const label = relative(project, relationship.file);
+    validateEntityId(relationship.id, label, errors);
+    requireFields(relationship.rawData, ["participants"], label, errors);
+    validateStringArray(relationship.rawData, "participants", label, errors);
+    requireExactType(relationship.rawData, "relationship", label, errors);
+  }
+
+  for (const snapshot of project.stateSnapshots) {
+    const label = relative(project, snapshot.file);
+    requireFields(snapshot.rawData, ["sequence"], label, errors);
+    requireInteger(snapshot.rawData, "sequence", label, errors);
+    validateObjectArray(snapshot.rawData, "characters", label, errors);
+    validateObjectArray(snapshot.rawData, "objects", label, errors);
+    validateObjectArray(snapshot.rawData, "relationships", label, errors);
+    requireExactType(snapshot.rawData, "state-snapshot", label, errors);
+  }
+
+  if (project.currentState) {
+    const label = path.join("continuity", "state", "current.md");
+    requireExactType(project.currentState.data, "state-current", label, errors);
+  }
+}
+
+function requireExactType(data, expected, label, errors) {
+  if (data.type !== undefined && data.type !== expected) {
+    errors.push(`${label} type must be ${expected}`);
   }
 }
 

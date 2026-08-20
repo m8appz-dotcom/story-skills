@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 // src/cli.js
-import path4 from "node:path";
+import path10 from "node:path";
 
 // src/import.js
-import fs2 from "node:fs";
-import path3 from "node:path";
+import fs3 from "node:fs";
+import path9 from "node:path";
 
 // src/frontmatter.js
 var FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
@@ -24,23 +24,9 @@ function stringifyFrontmatter(data) {
   const lines = ["---"];
   for (const [key, value] of Object.entries(data)) {
     if (Array.isArray(value)) {
-      if (value.length === 0) {
-        lines.push(`${key}: []`);
-        continue;
-      }
-      lines.push(`${key}:`);
-      for (const item of value) {
-        if (isPlainObject(item)) {
-          const entries = Object.entries(item);
-          const [firstKey, firstValue] = entries[0];
-          lines.push(`  - ${firstKey}: ${formatScalar(firstValue)}`);
-          for (const [childKey, childValue] of entries.slice(1)) {
-            lines.push(`    ${childKey}: ${formatScalar(childValue)}`);
-          }
-        } else {
-          lines.push(`  - ${formatScalar(item)}`);
-        }
-      }
+      appendList(lines, key, value);
+    } else if (isPlainObject(value)) {
+      appendMapping(lines, key, value);
     } else {
       lines.push(`${key}: ${formatScalar(value)}`);
     }
@@ -55,6 +41,39 @@ function replaceFrontmatter(markdown, data) {
     throw new Error("Cannot replace missing YAML frontmatter");
   }
   return `${stringifyFrontmatter(data)}${markdown.slice(match[0].length)}`;
+}
+function appendList(lines, key, value) {
+  if (value.length === 0) {
+    lines.push(`${key}: []`);
+    return;
+  }
+  lines.push(`${key}:`);
+  for (const item of value) {
+    if (isPlainObject(item)) {
+      const entries = Object.entries(item);
+      const [firstKey, firstValue] = entries[0];
+      lines.push(`  - ${firstKey}: ${formatScalar(firstValue)}`);
+      for (const [childKey, childValue] of entries.slice(1)) {
+        lines.push(`    ${childKey}: ${formatScalar(childValue)}`);
+      }
+    } else {
+      lines.push(`  - ${formatScalar(item)}`);
+    }
+  }
+}
+function appendMapping(lines, key, value) {
+  const entries = Object.entries(value);
+  if (entries.length === 0) {
+    lines.push(`${key}: {}`);
+    return;
+  }
+  lines.push(`${key}:`);
+  for (const [childKey, childValue] of entries) {
+    if (Array.isArray(childValue) || isPlainObject(childValue)) {
+      throw new Error(`Frontmatter mapping ${key}.${childKey} must be a scalar`);
+    }
+    lines.push(`  ${childKey}: ${formatScalar(childValue)}`);
+  }
 }
 function parseYaml(source) {
   const lines = source.split(/\r?\n/);
@@ -75,16 +94,37 @@ function parseYaml(source) {
       index += 1;
       continue;
     }
-    const parsed = parseArray(lines, index + 1);
-    if (parsed.nextIndex === index + 1) {
+    const block = parseBlock(lines, index + 1);
+    if (block.nextIndex === index + 1) {
       data[key] = "";
       index += 1;
       continue;
     }
-    data[key] = parsed.items;
-    index = parsed.nextIndex;
+    data[key] = block.value;
+    index = block.nextIndex;
   }
   return data;
+}
+function parseBlock(lines, startIndex) {
+  if (/^  -(?:\s|$)/.test(lines[startIndex] ?? "")) {
+    const parsed2 = parseArray(lines, startIndex);
+    return { value: parsed2.items, nextIndex: parsed2.nextIndex };
+  }
+  const parsed = parseMapping(lines, startIndex);
+  return { value: parsed.entries, nextIndex: parsed.nextIndex };
+}
+function parseMapping(lines, startIndex) {
+  const entries = {};
+  let index = startIndex;
+  while (index < lines.length) {
+    const childMatch = /^  ([A-Za-z0-9_-]+):(?:\s*(.*))?$/.exec(lines[index]);
+    if (!childMatch) {
+      break;
+    }
+    entries[childMatch[1]] = parseScalar(childMatch[2] ?? "");
+    index += 1;
+  }
+  return { entries, nextIndex: index };
 }
 function parseArray(lines, startIndex) {
   const items = [];
@@ -122,6 +162,9 @@ function parseScalar(value) {
   if (trimmed === "[]") {
     return [];
   }
+  if (trimmed === "{}") {
+    return {};
+  }
   if (/^-?\d+$/.test(trimmed)) {
     return Number.parseInt(trimmed, 10);
   }
@@ -148,7 +191,7 @@ function formatScalar(value) {
     return "";
   }
   const text = String(value);
-  if (text === "" || text === "[]" || /^-?\d+(\.\d+)?$/.test(text) || /^\s|\s$/.test(text) || /[:#\n"']/.test(text)) {
+  if (text === "" || text === "[]" || text === "{}" || /^-?\d+(\.\d+)?$/.test(text) || /^\s|\s$/.test(text) || /[:#\n"']/.test(text)) {
     return JSON.stringify(text);
   }
   return text;
@@ -204,12 +247,14 @@ function stripLeadingH1(markdownBody) {
 
 // src/story.js
 import { Buffer } from "node:buffer";
-import fs from "node:fs";
-import path2 from "node:path";
+import { createHash as createHash2 } from "node:crypto";
+import fs2 from "node:fs";
+import path8 from "node:path";
 
 // src/continuity.js
 import path from "node:path";
-var CHEKHOV_CHAPTER_GAP = 3;
+var DEFAULT_CHEKHOV_CHAPTER_GAP = 3;
+var PRE_STORY = "pre-story";
 function checkContinuity(project) {
   const errors = [];
   const warnings = [];
@@ -219,7 +264,8 @@ function checkContinuity(project) {
     locations: new Set(project.locations.map((location) => location.id)),
     artifacts: new Map(project.artifacts.map((artifact) => [artifact.id, artifact])),
     factions: new Set(project.factions.map((faction) => faction.id)),
-    latestChapter: project.chapters.reduce((max, chapter) => Math.max(max, chapter.number), 0)
+    latestChapter: project.chapters.reduce((max, chapter) => Math.max(max, chapter.number), 0),
+    chekhovGap: Number(project.story.data["chekhov-gap"] ?? DEFAULT_CHEKHOV_CHAPTER_GAP)
   };
   checkCharacterDeaths(project, context, errors);
   checkChapterCasts(project, warnings);
@@ -311,7 +357,7 @@ function checkPromises(project, context, errors, warnings) {
     if (promise.status === "planned" && promise.planted) {
       warnings.push(`${label} records planted chapter ${promise.planted} but status is still planned`);
     }
-    if (promise.status === "planted" && plantedNumber !== undefined && context.latestChapter - plantedNumber >= CHEKHOV_CHAPTER_GAP) {
+    if (promise.status === "planted" && plantedNumber !== undefined && context.latestChapter - plantedNumber >= context.chekhovGap) {
       warnings.push(`${label} was planted in ${promise.planted}, ${context.latestChapter - plantedNumber} chapters ago, and has no payoff yet`);
     }
   }
@@ -384,7 +430,7 @@ function checkContinuityState(project, context, errors, warnings) {
     if (!entry.knows) {
       errors.push(`${entryLabel} is missing knows`);
     }
-    if (entry["learned-in"] && !context.chapterNumbers.has(entry["learned-in"])) {
+    if (entry["learned-in"] && entry["learned-in"] !== PRE_STORY && !context.chapterNumbers.has(entry["learned-in"])) {
       errors.push(`${entryLabel} references missing chapter ${entry["learned-in"]}`);
     }
   }
@@ -425,8 +471,1857 @@ function relative(project, file) {
   return path.relative(project.root, file);
 }
 
+// src/project-io.js
+import fs from "node:fs";
+import path2 from "node:path";
+function readMarkdown(filePath, root) {
+  if (root) {
+    assertSafeProjectPath(filePath, root);
+  }
+  const rawMarkdown = fs.readFileSync(filePath, "utf8");
+  const parsed = parseFrontmatter(rawMarkdown, filePath);
+  return { ...parsed, rawMarkdown };
+}
+function writeFile(filePath, contents, options = {}) {
+  const target = prepareWriteTarget(filePath, options.root);
+  fs.writeFileSync(target, contents, "utf8");
+}
+function safeRead(filePath, root) {
+  if (!fs.existsSync(filePath)) {
+    return "";
+  }
+  if (root) {
+    assertSafeProjectPath(filePath, root);
+  }
+  return fs.readFileSync(filePath, "utf8");
+}
+function prepareWriteTarget(filePath, root) {
+  const target = path2.resolve(filePath);
+  if (root) {
+    assertLexicallyInsideRoot(target, root);
+  }
+  fs.mkdirSync(path2.dirname(target), { recursive: true });
+  if (root) {
+    assertSafeProjectParent(target, root);
+  }
+  rejectSymlinkTarget(target);
+  return target;
+}
+function assertSafeProjectPath(filePath, root) {
+  const target = path2.resolve(filePath);
+  assertLexicallyInsideRoot(target, root);
+  assertSafeProjectParent(target, root);
+  rejectSymlinkTarget(target);
+}
+function assertSafeProjectDirectory(directory, root) {
+  const target = path2.resolve(directory);
+  assertLexicallyInsideRoot(target, root);
+  const stats = lstatIfExists(target);
+  if (stats) {
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Refusing to use symlinked project directory: ${target}`);
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(`Project path is not a directory: ${target}`);
+    }
+  }
+  const rootReal = fs.realpathSync(path2.resolve(root));
+  const directoryReal = fs.realpathSync(target);
+  if (!isPathInside(rootReal, directoryReal)) {
+    throw new Error(`Refusing to use project directory outside root: ${target}`);
+  }
+}
+function assertSafeProjectParent(filePath, root) {
+  const rootReal = fs.realpathSync(path2.resolve(root));
+  const parentReal = fs.realpathSync(path2.dirname(path2.resolve(filePath)));
+  if (!isPathInside(rootReal, parentReal)) {
+    throw new Error(`Refusing to access project path outside root: ${filePath}`);
+  }
+}
+function assertLexicallyInsideRoot(filePath, root) {
+  const rootPath = path2.resolve(root);
+  const target = path2.resolve(filePath);
+  if (!isPathInside(rootPath, target)) {
+    throw new Error(`Refusing to access path outside project root: ${target}`);
+  }
+}
+function rejectSymlinkTarget(filePath) {
+  if (lstatIfExists(filePath)?.isSymbolicLink()) {
+    throw new Error(`Refusing to write through symlink: ${filePath}`);
+  }
+}
+function lstatIfExists(filePath) {
+  return fs.lstatSync(filePath, { throwIfNoEntry: false }) ?? null;
+}
+function isPathInside(root, target) {
+  const relativePath = path2.relative(root, target);
+  return relativePath === "" || !relativePath.startsWith("..") && !path2.isAbsolute(relativePath);
+}
+
+// src/epistemic.js
+import path3 from "node:path";
+var TRUTH_STATUSES = new Set(["true", "false", "ambiguous", "undetermined"]);
+var EPISTEMIC_STATUSES = new Set(["knows", "believes", "suspects", "doubts", "misbelieves", "unknown"]);
+var CONFIDENCE_LEVELS = new Set(["low", "medium", "high"]);
+var PRE_STORY2 = "pre-story";
+function checkEpistemicGraph(project) {
+  const errors = [];
+  const warnings = [];
+  checkFacts(project, errors, warnings);
+  checkKnowledge(project, errors, warnings);
+  return { ok: errors.length === 0, errors, warnings };
+}
+function checkFacts(project, errors, warnings) {
+  const seen = new Map;
+  for (const fact of project.facts) {
+    const label = relative2(project, fact.file);
+    if (fact.declaredId && fact.declaredId !== fact.id) {
+      errors.push(`${label} declares id ${fact.declaredId} but the filename is ${fact.id}`);
+    }
+    if (seen.has(fact.id)) {
+      errors.push(`${label} duplicates fact id ${fact.id} already defined in ${relative2(project, seen.get(fact.id))}`);
+    } else {
+      seen.set(fact.id, fact.file);
+    }
+    if (!fact.statement) {
+      errors.push(`${label} is missing statement`);
+    }
+    if (fact.truthStatus && !TRUTH_STATUSES.has(fact.truthStatus)) {
+      errors.push(`${label} truth-status ${fact.truthStatus} is not one of ${[...TRUTH_STATUSES].join(", ")}`);
+    }
+    const established = chapterPosition(project, fact.establishedIn, label, "established-in", errors);
+    const resolved = chapterPosition(project, fact.resolvedIn, label, "resolved-in", errors);
+    if (established !== null && resolved !== null && resolved < established) {
+      errors.push(`${label} resolves in ${fact.resolvedIn} before it is established in ${fact.establishedIn}`);
+    }
+    if (!fact.establishedIn) {
+      warnings.push(`${label} has no established-in chapter; set it or ${PRE_STORY2}`);
+    }
+  }
+}
+function checkKnowledge(project, errors, warnings) {
+  const characters = new Set(project.characters.map((character) => character.id));
+  const facts = new Set(project.facts.map((fact) => fact.id));
+  const currentPosition = currentStatePosition(project);
+  for (const record of project.knowledge) {
+    const label = relative2(project, record.file);
+    if (record.declaredCharacter && record.declaredCharacter !== record.id) {
+      errors.push(`${label} declares character ${record.declaredCharacter} but the filename is ${record.id}`);
+    }
+    if (!characters.has(record.character)) {
+      errors.push(`${label} references missing character ${record.character || "(unset)"}`);
+    }
+    const seenFacts = new Map;
+    for (const [index, entry] of record.facts.entries()) {
+      const entryLabel = `${label} facts[${index}]`;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        errors.push(`${entryLabel} must be a mapping`);
+        continue;
+      }
+      if (!entry.fact || !facts.has(entry.fact)) {
+        errors.push(`${entryLabel} references missing fact ${entry.fact || "(unset)"}`);
+      }
+      if (!entry.status) {
+        errors.push(`${entryLabel} is missing status`);
+      } else if (!EPISTEMIC_STATUSES.has(entry.status)) {
+        errors.push(`${entryLabel} status ${entry.status} is not one of ${[...EPISTEMIC_STATUSES].join(", ")}`);
+      }
+      if (entry.confidence && !CONFIDENCE_LEVELS.has(entry.confidence)) {
+        errors.push(`${entryLabel} confidence ${entry.confidence} is not one of ${[...CONFIDENCE_LEVELS].join(", ")}`);
+      }
+      if (entry.fact && seenFacts.has(entry.fact)) {
+        const previous = seenFacts.get(entry.fact);
+        errors.push(previous === entry.status ? `${entryLabel} duplicates fact ${entry.fact}` : `${entryLabel} contradicts an earlier entry for fact ${entry.fact}: ${previous} then ${entry.status}`);
+      } else if (entry.fact) {
+        seenFacts.set(entry.fact, entry.status);
+      }
+      const learned = chapterPosition(project, entry["learned-in"], entryLabel, "learned-in", errors);
+      if (learned !== null && currentPosition !== null && learned > currentPosition) {
+        errors.push(`${entryLabel} is learned-in ${entry["learned-in"]}, which is ahead of the current accepted state ${describePosition(project, currentPosition)}`);
+      }
+      if (entry.status === "unknown" && entry["learned-in"]) {
+        errors.push(`${entryLabel} is status unknown but records learned-in ${entry["learned-in"]}`);
+      }
+      if (entry.status && entry.status !== "unknown" && !entry["learned-in"]) {
+        warnings.push(`${entryLabel} is status ${entry.status} with no learned-in chapter; set it or ${PRE_STORY2}`);
+      }
+    }
+  }
+}
+function chapterPosition(project, value, label, field, errors) {
+  const text = String(value ?? "").trim();
+  if (text === "") {
+    return null;
+  }
+  if (text === PRE_STORY2) {
+    return 0;
+  }
+  const chapter = project.chapters.find((item) => item.id === text);
+  if (!chapter) {
+    if (errors) {
+      errors.push(`${label} ${field} references missing chapter ${text}`);
+    }
+    return null;
+  }
+  return chapter.number;
+}
+function currentStatePosition(project) {
+  if (!project.stateSnapshots || project.stateSnapshots.length === 0) {
+    return null;
+  }
+  const latest = project.stateSnapshots[project.stateSnapshots.length - 1];
+  return chapterPosition(project, latest.chapter, "", "", null) ?? 0;
+}
+function describePosition(project, position) {
+  if (position === 0) {
+    return PRE_STORY2;
+  }
+  const chapter = project.chapters.find((item) => item.number === position);
+  return chapter ? chapter.id : `chapter ${position}`;
+}
+function relative2(project, file) {
+  return path3.relative(project.root, file);
+}
+
+// src/relationships.js
+import path4 from "node:path";
+function checkRelationships(project) {
+  const errors = [];
+  const warnings = [];
+  const characters = new Set(project.characters.map((character) => character.id));
+  const pairs = new Map;
+  for (const relationship of project.relationships) {
+    const label = relative3(project, relationship.file);
+    if (relationship.declaredId && relationship.declaredId !== relationship.id) {
+      errors.push(`${label} declares id ${relationship.declaredId} but the filename is ${relationship.id}`);
+    }
+    if (relationship.participants.length < 2) {
+      errors.push(`${label} must list at least two participants`);
+      continue;
+    }
+    for (const participant of relationship.participants) {
+      if (!characters.has(participant)) {
+        errors.push(`${label} references missing character ${participant}`);
+      }
+    }
+    const key = [...relationship.participants].sort().join("+");
+    if (pairs.has(key)) {
+      errors.push(`${label} duplicates the participants of ${relative3(project, pairs.get(key))}`);
+    } else {
+      pairs.set(key, relationship.file);
+    }
+    if (relationship.lastMajorChange && !project.chapters.some((chapter) => chapter.id === relationship.lastMajorChange)) {
+      errors.push(`${label} last-major-change references missing chapter ${relationship.lastMajorChange}`);
+    }
+    const expectedId = [...relationship.participants].sort().join("-");
+    if (relationship.id !== expectedId) {
+      warnings.push(`${label} id does not match its sorted participants (${expectedId})`);
+    }
+  }
+  return { ok: errors.length === 0, errors, warnings };
+}
+function relative3(project, file) {
+  return path4.relative(project.root, file);
+}
+
+// src/projection.js
+var VISIBLE_STATUSES = ["knows", "believes", "suspects", "doubts", "misbelieves"];
+var OBSERVABLE_STATE_FIELDS = ["location", "physical"];
+var CONCEALED_OBJECT_STATUSES = new Set(["hidden", "lost", "destroyed", "unknown"]);
+function projectContext(project, options = {}) {
+  const chapterId = String(options.chapter ?? "").trim();
+  const povId = String(options.pov ?? "").trim();
+  const chapter = resolveChapter(project, chapterId);
+  const povCharacter = project.characters.find((item) => item.id === povId);
+  if (!povCharacter) {
+    throw new Error(`Unknown POV character: ${povId || "(unset)"}`);
+  }
+  const entering = enteringSnapshot(project, chapter.number);
+  const knowledge = projectKnowledge(project, povId, chapter.number);
+  const povState = findEntry(entering, "characters", povId);
+  return {
+    chapter: chapter.id,
+    scene: options.scene ? String(options.scene) : "",
+    pov: povId,
+    narrative: {
+      tense: project.story.data.tense ?? "",
+      pov: project.story.data.pov ?? "",
+      genre: project.story.data.genre ?? ""
+    },
+    "story-time": entering ? entering.storyTime : {},
+    character: {
+      id: povCharacter.id,
+      name: povCharacter.name,
+      role: povCharacter.role,
+      ...causality(povCharacter)
+    },
+    state: povState ? withoutId(povState) : {},
+    knowledge,
+    relationships: projectRelationships(project, entering, povId),
+    present: projectPresentCharacters(project, entering, chapter, povId),
+    location: projectLocation(project, povState),
+    objects: projectObjects(project, entering, povId, povState),
+    "active-threads": entering ? entering.activeThreads : [],
+    excluded: {
+      facts: project.facts.length - countVisible(knowledge),
+      reason: "not knowable by this POV character at this point in the story"
+    }
+  };
+}
+function resolveChapter(project, chapterId) {
+  if (!chapterId) {
+    throw new Error("A chapter id is required");
+  }
+  const chapter = project.chapters.find((item) => item.id === chapterId);
+  if (chapter) {
+    return chapter;
+  }
+  const number = Number(String(chapterId).replace(/[^0-9]/g, ""));
+  if (!Number.isInteger(number) || number < 1) {
+    throw new Error(`Unknown chapter: ${chapterId}`);
+  }
+  return { id: chapterId, number, characters: [], locations: [] };
+}
+function enteringSnapshot(project, number) {
+  return project.stateSnapshots.find((snapshot) => snapshot.sequence === number - 1) ?? null;
+}
+function projectKnowledge(project, povId, chapterNumber) {
+  const buckets = Object.fromEntries(VISIBLE_STATUSES.map((status) => [status, []]));
+  const record = project.knowledge.find((item) => item.character === povId);
+  if (!record) {
+    return buckets;
+  }
+  const facts = new Map(project.facts.map((fact) => [fact.id, fact]));
+  for (const entry of record.facts) {
+    if (!entry || !VISIBLE_STATUSES.includes(entry.status)) {
+      continue;
+    }
+    const fact = facts.get(entry.fact);
+    if (!fact) {
+      continue;
+    }
+    if (establishedAfter(project, fact, chapterNumber)) {
+      continue;
+    }
+    if (learnedAfter(project, entry, chapterNumber)) {
+      continue;
+    }
+    buckets[entry.status].push({
+      fact: fact.id,
+      statement: fact.statement,
+      "learned-in": entry["learned-in"] ?? "",
+      ...entry.confidence ? { confidence: entry.confidence } : {},
+      ...entry.source ? { source: entry.source } : {}
+    });
+  }
+  return buckets;
+}
+function establishedAfter(project, fact, chapterNumber) {
+  return chapterNumberOf(project, fact.establishedIn) > chapterNumber;
+}
+function learnedAfter(project, entry, chapterNumber) {
+  return chapterNumberOf(project, entry["learned-in"]) > chapterNumber;
+}
+function chapterNumberOf(project, value) {
+  const text = String(value ?? "").trim();
+  if (text === "" || text === PRE_STORY2) {
+    return 0;
+  }
+  const chapter = project.chapters.find((item) => item.id === text);
+  if (chapter) {
+    return chapter.number;
+  }
+  const parsed = Number(text.replace(/[^0-9]/g, ""));
+  return Number.isInteger(parsed) ? parsed : 0;
+}
+function projectRelationships(project, snapshot, povId) {
+  const merged = new Map;
+  const key = (participants) => [...participants].sort().join("+");
+  const pov = project.characters.find((character) => character.id === povId);
+  for (const entry of pov ? pov.relationships : []) {
+    if (!entry || typeof entry !== "object" || !entry.character) {
+      continue;
+    }
+    const participants = [povId, entry.character];
+    merged.set(key(participants), {
+      id: [...participants].sort().join("-"),
+      with: [entry.character],
+      type: entry.type ?? "",
+      state: {},
+      "public-status": "",
+      "private-status": ""
+    });
+  }
+  for (const relationship of project.relationships) {
+    if (!relationship.participants.includes(povId)) {
+      continue;
+    }
+    const live = findEntry(snapshot, "relationships", relationship.id);
+    const existing = merged.get(key(relationship.participants)) ?? {};
+    merged.set(key(relationship.participants), {
+      id: relationship.id,
+      with: relationship.participants.filter((participant) => participant !== povId),
+      type: existing.type ?? "",
+      state: { ...relationship.state, ...live ? withoutId(live) : {} },
+      "public-status": relationship.publicStatus,
+      "private-status": relationship.privateStatus
+    });
+  }
+  return [...merged.values()];
+}
+function projectPresentCharacters(project, snapshot, chapter, povId) {
+  const cast = chapter.characters.length > 0 ? chapter.characters : snapshot ? snapshot.characters.map((entry) => entry.id) : [];
+  return cast.filter((id) => id !== povId).map((id) => project.characters.find((character) => character.id === id)).filter(Boolean).map((character) => {
+    const state = findEntry(snapshot, "characters", character.id);
+    const observable = {};
+    for (const field of OBSERVABLE_STATE_FIELDS) {
+      if (state && state[field]) {
+        observable[field] = state[field];
+      }
+    }
+    return {
+      id: character.id,
+      name: character.name,
+      status: character.status,
+      observable
+    };
+  });
+}
+function projectLocation(project, povState) {
+  if (!povState || !povState.location) {
+    return {};
+  }
+  const location = project.locations.find((item) => item.id === povState.location);
+  if (!location) {
+    return { id: povState.location };
+  }
+  return { id: location.id, name: location.name, type: location.type, region: location.region };
+}
+function projectObjects(project, snapshot, povId, povState) {
+  if (!snapshot) {
+    return [];
+  }
+  const here = povState ? povState.location : "";
+  return snapshot.objects.filter((entry) => entry.owner === povId || here && entry.location === here && !CONCEALED_OBJECT_STATUSES.has(String(entry.status ?? ""))).map((entry) => {
+    const artifact = project.artifacts.find((item) => item.id === entry.id);
+    return {
+      id: entry.id,
+      name: artifact ? artifact.name : entry.id,
+      ...withoutId(entry)
+    };
+  });
+}
+function causality(character) {
+  const fields = {};
+  for (const [key, value] of Object.entries(character.causality ?? {})) {
+    if (value) {
+      fields[key] = value;
+    }
+  }
+  return fields;
+}
+function findEntry(snapshot, collection, id) {
+  if (!snapshot) {
+    return null;
+  }
+  return snapshot[collection].find((entry) => entry && entry.id === id) ?? null;
+}
+function withoutId(entry) {
+  const { id, ...rest } = entry;
+  return rest;
+}
+function countVisible(knowledge) {
+  return Object.values(knowledge).reduce((sum, list) => sum + list.length, 0);
+}
+
+// src/arcs.js
+import path5 from "node:path";
+var HARD_CONSTRAINT_KINDS = new Set([
+  "knowledge",
+  "possession",
+  "location",
+  "reveal",
+  "survival",
+  "other"
+]);
+function checkArcs(project) {
+  const errors = [];
+  const warnings = [];
+  const chapters = new Set(project.chapters.map((chapter) => chapter.id));
+  const characters = new Set(project.characters.map((character) => character.id));
+  const facts = new Set(project.facts.map((fact) => fact.id));
+  const artifacts = new Set(project.artifacts.map((artifact) => artifact.id));
+  const sealed = new Set(project.sealedArcs.map((plan) => plan.id));
+  for (const arc of project.arcs) {
+    const label = relative4(project, arc.file);
+    for (const chapterId of arc.chapters) {
+      if (!chapters.has(chapterId)) {
+        warnings.push(`${label} plans chapter ${chapterId}, which is not canon yet`);
+      }
+    }
+    if (arc.sealedVersion && !sealed.has(arc.sealedVersion)) {
+      errors.push(`${label} derives from sealed plan ${arc.sealedVersion}, which does not exist`);
+    }
+    checkConstraints(project, arc, label, { chapters, characters, facts, artifacts }, errors, warnings);
+  }
+  for (const plan of project.sealedArcs) {
+    const label = relative4(project, plan.file);
+    if (!project.arcs.some((arc) => arc.id === plan.arc)) {
+      errors.push(`${label} seals arc ${plan.arc}, which no longer exists`);
+    }
+    if (!Number.isInteger(plan.version) || plan.version < 1) {
+      errors.push(`${label} must declare a positive plan-version`);
+    }
+  }
+  return { ok: errors.length === 0, errors, warnings };
+}
+function checkConstraints(project, arc, label, known, errors, warnings) {
+  for (const [index, constraint] of arc.hardConstraints.entries()) {
+    const entryLabel = `${label} hard-constraints[${index}]`;
+    if (!constraint || typeof constraint !== "object" || Array.isArray(constraint)) {
+      errors.push(`${entryLabel} must be a mapping`);
+      continue;
+    }
+    if (!constraint.constraint) {
+      errors.push(`${entryLabel} is missing constraint`);
+    }
+    if (constraint.kind && !HARD_CONSTRAINT_KINDS.has(constraint.kind)) {
+      errors.push(`${entryLabel} kind ${constraint.kind} is not one of ${[...HARD_CONSTRAINT_KINDS].join(", ")}`);
+    }
+    for (const [field, set, kind] of [
+      ["character", known.characters, "character"],
+      ["fact", known.facts, "fact"],
+      ["artifact", known.artifacts, "artifact"]
+    ]) {
+      if (constraint[field] && !set.has(constraint[field])) {
+        errors.push(`${entryLabel} references missing ${kind} ${constraint[field]}`);
+      }
+    }
+    if (constraint.until && !known.chapters.has(constraint.until)) {
+      if (/^chapter-\d+$/.test(String(constraint.until))) {
+        warnings.push(`${entryLabel} expires at ${constraint.until}, which is not canon yet`);
+      } else {
+        errors.push(`${entryLabel} until ${constraint.until} is not a chapter id`);
+      }
+    }
+  }
+}
+function constraintsForChapter(project, chapterId, chapterNumber) {
+  const active = [];
+  for (const arc of project.arcs) {
+    if (arc.chapters.length > 0 && !arc.chapters.includes(chapterId)) {
+      continue;
+    }
+    for (const constraint of arc.hardConstraints) {
+      if (!constraint || typeof constraint !== "object") {
+        continue;
+      }
+      if (expired(project, constraint.until, chapterNumber)) {
+        continue;
+      }
+      active.push({ arc: arc.id, ...constraint });
+    }
+  }
+  return active;
+}
+function expired(project, until, chapterNumber) {
+  if (!until) {
+    return false;
+  }
+  const chapter = project.chapters.find((item) => item.id === until);
+  const number = chapter ? chapter.number : Number(String(until).replace(/[^0-9]/g, ""));
+  return Number.isInteger(number) && number < chapterNumber;
+}
+function relative4(project, file) {
+  return path5.relative(project.root, file);
+}
+function checkCausalChains(project) {
+  const errors = [];
+  const warnings = [];
+  const characters = new Set(project.characters.map((character) => character.id));
+  const facts = new Set(project.facts.map((fact) => fact.id));
+  for (const arc of project.arcs) {
+    const label = relative4(project, arc.file);
+    checkArcCharacters(arc, label, characters, errors);
+    checkChain(project, arc, label, characters, facts, errors, warnings);
+  }
+  return { ok: errors.length === 0, errors, warnings };
+}
+function checkArcCharacters(arc, label, characters, errors) {
+  const seen = new Set;
+  for (const [index, entry] of arc.arcCharacters.entries()) {
+    const entryLabel = `${label} arc-characters[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      errors.push(`${entryLabel} must be a mapping`);
+      continue;
+    }
+    if (!entry.id || !characters.has(entry.id)) {
+      errors.push(`${entryLabel} references missing character ${entry.id || "(unset)"}`);
+      continue;
+    }
+    if (seen.has(entry.id)) {
+      errors.push(`${entryLabel} duplicates character ${entry.id}`);
+    }
+    seen.add(entry.id);
+  }
+}
+function checkChain(project, arc, label, characters, facts, errors, warnings) {
+  let previousStep = 0;
+  for (const [index, entry] of arc.causalChain.entries()) {
+    const entryLabel = `${label} causal-chain[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      errors.push(`${entryLabel} must be a mapping`);
+      continue;
+    }
+    const step = Number(entry.step ?? index + 1);
+    if (!Number.isInteger(step) || step <= previousStep) {
+      errors.push(`${entryLabel} step ${entry.step ?? "(unset)"} must increase; the chain is an ordered sequence`);
+    }
+    previousStep = Number.isInteger(step) ? step : previousStep;
+    if (entry.character && !characters.has(entry.character)) {
+      errors.push(`${entryLabel} references missing character ${entry.character}`);
+    }
+    if (entry.chapter && arc.chapters.length > 0 && !arc.chapters.includes(entry.chapter)) {
+      errors.push(`${entryLabel} happens in ${entry.chapter}, which is outside this arc`);
+    }
+    if (entry.learns) {
+      if (!facts.has(entry.learns)) {
+        errors.push(`${entryLabel} references missing fact ${entry.learns}`);
+      } else {
+        checkAgainstConstraints(project, arc, entry, entryLabel, errors);
+      }
+    }
+    if (!entry.cause && !entry.effect) {
+      warnings.push(`${entryLabel} records neither cause nor effect`);
+    }
+  }
+}
+function checkAgainstConstraints(project, arc, entry, entryLabel, errors) {
+  const stepNumber = chapterNumber(project, entry.chapter);
+  for (const constraint of arc.hardConstraints) {
+    if (!constraint || typeof constraint !== "object") {
+      continue;
+    }
+    if (constraint.fact !== entry.learns) {
+      continue;
+    }
+    if (constraint.character && entry.character && constraint.character !== entry.character) {
+      continue;
+    }
+    const until = chapterNumber(project, constraint.until);
+    if (until !== null && stepNumber !== null && stepNumber < until) {
+      errors.push(`${entryLabel} has ${entry.character || "someone"} learn ${entry.learns} in ${entry.chapter}, but a hard constraint withholds it until ${constraint.until}`);
+    }
+  }
+}
+function chapterNumber(project, value) {
+  const text = String(value ?? "").trim();
+  if (text === "") {
+    return null;
+  }
+  const chapter = project.chapters.find((item) => item.id === text);
+  if (chapter) {
+    return chapter.number;
+  }
+  const parsed = Number(text.replace(/[^0-9]/g, ""));
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+// src/arc-simulation.js
+var ARC_SIMULATION_VERSION = 1;
+var GUIDANCE = {
+  task: "Simulate what each character does across this arc, on the page and off it, given their goal, pressure, resources, and what they actually know at the arc's opening.",
+  "hard-constraints": "Mandatory. A simulated action that violates one of these is wrong, however plausible it seems.",
+  knowledge: "Each character's knowledge block is what they hold at the arc's opening. Do not have them act on anything outside it unless a step in your chain makes them learn it first.",
+  "offscreen-actions": "Antagonists and absent characters keep acting while the POV is elsewhere. Say what they do, not only what the reader sees.",
+  "deceased-characters": "A character marked with a simulation-note takes no new action. They shape the arc only through what they left behind.",
+  "causal-chain": "Return an ordered chain of cause and effect. Where a step makes someone learn a canonical fact, name it in `learns` so the constraint checker can verify it.",
+  "not-a-beat-sheet": "This is causal reasoning, not an outline. Leave room for the drafting to find better local action."
+};
+function buildArcSimulation(project, options = {}) {
+  const arcId = String(options.arc ?? "").trim();
+  const arc = project.arcs.find((item) => item.id === arcId);
+  if (!arc) {
+    throw new Error(`Unknown arc: ${arcId || "(unset)"}`);
+  }
+  if (arc.chapters.length === 0) {
+    throw new Error(`${arc.id} has no chapters; add a chapters list before simulating`);
+  }
+  const opening = arc.chapters[0];
+  return {
+    version: ARC_SIMULATION_VERSION,
+    arc: arc.id,
+    name: arc.name,
+    "plan-version": arc.planVersion,
+    "sealed-version": arc.sealedVersion,
+    chapters: arc.chapters,
+    guidance: GUIDANCE,
+    objective: {
+      "dramatic-objective": arc.dramaticObjective,
+      "starting-state": arc.startingState,
+      "target-end-state": arc.targetEndState
+    },
+    "hard-constraints": arc.hardConstraints,
+    "required-setups": arc.requiredSetups,
+    "required-payoffs": arc.requiredPayoffs,
+    "soft-possibilities": arc.softPossibilities,
+    characters: buildCharacterBriefs(project, arc, opening),
+    "open-questions": project.questions.filter((question) => question.status === "open").map((question) => ({ id: question.id, title: question.title, introduced: question.introduced })),
+    "unpaid-promises": project.promises.filter((promise) => promise.status === "planted").map((promise) => ({ id: promise.id, title: promise.title, planted: promise.planted })),
+    "causal-chain": arc.causalChain
+  };
+}
+function buildCharacterBriefs(project, arc, opening) {
+  const declared = new Map(arc.arcCharacters.filter((entry) => entry && typeof entry === "object" && entry.id).map((entry) => [entry.id, entry]));
+  const ids = [...new Set([...declared.keys(), ...arc.characters])];
+  return ids.map((id) => {
+    const character = project.characters.find((item) => item.id === id);
+    if (!character) {
+      return null;
+    }
+    const entry = declared.get(id) ?? {};
+    const projection = safeProjection(project, opening, id);
+    if (!canAct(character)) {
+      return {
+        id,
+        name: character.name,
+        role: character.role,
+        status: character.status,
+        "died-in": character.diedIn,
+        "simulation-note": "Takes no new action. May shape this arc only through evidence, memory, record, or what they left behind.",
+        "knowledge-at-arc-start": projection ? projection.knowledge : {}
+      };
+    }
+    return {
+      id,
+      name: character.name,
+      role: character.role,
+      status: character.status,
+      goal: entry.goal ?? character.causality["external-goal"] ?? "",
+      pressure: entry.pressure ?? "",
+      resources: entry.resources ?? "",
+      "likely-actions": entry["likely-actions"] ?? "",
+      "offscreen-actions": entry["offscreen-actions"] ?? "",
+      ...interiorFields(character),
+      "knowledge-at-arc-start": projection ? projection.knowledge : {},
+      "state-at-arc-start": projection ? projection.state : {}
+    };
+  }).filter(Boolean);
+}
+function interiorFields(character) {
+  const fields = {};
+  for (const key of ["internal-need", "fear", "false-belief", "private-information", "stress-response"]) {
+    if (character.causality[key]) {
+      fields[key] = character.causality[key];
+    }
+  }
+  return fields;
+}
+function canAct(character) {
+  return character.status !== "deceased";
+}
+function safeProjection(project, chapterId, povId) {
+  try {
+    return projectContext(project, { chapter: chapterId, pov: povId });
+  } catch {
+    return null;
+  }
+}
+
+// src/render-packet.js
+var RENDER_PACKET_VERSION = 1;
+var GUIDANCE2 = {
+  "hard-constraints": "Mandatory. Do not violate any of these.",
+  "possible-beats": "Optional. Suggestions only; discard any that do not serve the scene.",
+  freedom: "You may discover better local action, dialogue, blocking, or emotional turns than the ones suggested, provided every hard constraint, the POV character's knowledge, and canonical state remain intact.",
+  "not-a-script": "Do not transcribe planning notes into prose. Write the scene."
+};
+var VOICE_FIELDS = ["speech-principle", "avoidance-pattern"];
+function buildRenderPacket(project, options = {}) {
+  const projection = projectContext(project, options);
+  const chapter = project.chapters.find((item) => item.id === projection.chapter);
+  const chapterNumber2 = chapter ? chapter.number : chapterNumberFrom(projection.chapter);
+  const scene = findScene(project, projection.chapter, options.scene);
+  return {
+    version: RENDER_PACKET_VERSION,
+    chapter: projection.chapter,
+    scene: scene ? scene.id : "",
+    pov: projection.pov,
+    guidance: GUIDANCE2,
+    narrative: {
+      tense: projection.narrative.tense,
+      person: projection.narrative.pov,
+      genre: projection.narrative.genre,
+      distance: options.distance ?? "close",
+      "style-profile": options["style-profile"] ?? ""
+    },
+    "scene-contract": buildSceneContract(scene, projection),
+    "hard-constraints": buildHardConstraints(project, projection, scene, chapterNumber2),
+    knowledge: projection.knowledge,
+    relationships: projection.relationships,
+    "voice-cards": buildVoiceCards(project, projection),
+    "reveal-budget": buildRevealBudget(project, projection, chapterNumber2),
+    "possible-beats": buildPossibleBeats(project, scene, projection.chapter),
+    "previous-scene": {
+      "ending-state": projection.state,
+      "story-time": projection["story-time"],
+      "active-threads": projection["active-threads"]
+    },
+    setting: {
+      location: projection.location,
+      present: projection.present,
+      objects: projection.objects
+    },
+    "word-budget": buildWordBudget(options)
+  };
+}
+function buildSceneContract(scene, projection) {
+  if (!scene) {
+    return {
+      objective: "",
+      "active-opposition": "",
+      "emotional-pressure": "",
+      turn: "",
+      "exit-consequence": "",
+      note: `No scene record found for ${projection.chapter}; the writer sets the scene shape.`
+    };
+  }
+  return {
+    objective: scene.objective,
+    "active-opposition": scene.opposition,
+    "emotional-pressure": scene.emotionalPressure,
+    turn: scene.turn,
+    "exit-consequence": scene.exitConsequence
+  };
+}
+function buildHardConstraints(project, projection, scene, chapterNumber2) {
+  const arcConstraints = constraintsForChapter(project, projection.chapter, chapterNumber2);
+  const mandatoryFacts = [];
+  const forbiddenOutcomes = [];
+  const continuityRequirements = [];
+  for (const constraint of arcConstraints) {
+    const text = String(constraint.constraint ?? "");
+    if (!text) {
+      continue;
+    }
+    if (constraint.fact && !knownToPov(projection, constraint.fact)) {
+      forbiddenOutcomes.push(`${projection.pov} must not learn, infer, or be told anything beyond the knowledge listed in this packet.`);
+      continue;
+    }
+    if (constraint.kind === "knowledge" || constraint.kind === "reveal") {
+      forbiddenOutcomes.push(text);
+    } else {
+      continuityRequirements.push(text);
+    }
+  }
+  for (const constraint of scene ? scene.hardConstraints : []) {
+    const text = typeof constraint === "string" ? constraint : String(constraint?.constraint ?? "");
+    if (text) {
+      continuityRequirements.push(text);
+    }
+  }
+  for (const entry of projection.knowledge.misbelieves ?? []) {
+    forbiddenOutcomes.push(`${projection.pov} must not discover that this is false in this scene: ${entry.statement}`);
+  }
+  for (const entry of projection.knowledge.knows ?? []) {
+    mandatoryFacts.push(entry.statement);
+  }
+  return {
+    "mandatory-facts": unique(mandatoryFacts),
+    "forbidden-outcomes": unique(forbiddenOutcomes),
+    "continuity-requirements": unique(continuityRequirements)
+  };
+}
+function buildVoiceCards(project, projection) {
+  const ids = [projection.pov, ...projection.present.map((item) => item.id)];
+  return ids.map((id) => project.characters.find((character) => character.id === id)).filter(Boolean).map((character) => {
+    const card = { id: character.id, name: character.name };
+    for (const field of VOICE_FIELDS) {
+      if (character.causality[field]) {
+        card[field] = character.causality[field];
+      }
+    }
+    return card;
+  }).filter((card) => card.id === projection.pov || Object.keys(card).length > 2);
+}
+function buildRevealBudget(project, projection, chapterNumber2) {
+  return project.facts.filter((fact) => fact.resolvedIn === projection.chapter).filter((fact) => knownToPov(projection, fact.id)).map((fact) => ({ fact: fact.id, statement: fact.statement }));
+}
+function knownToPov(projection, factId) {
+  return Object.values(projection.knowledge).some((entries) => entries.some((entry) => entry.fact === factId));
+}
+function buildPossibleBeats(project, scene, chapterId) {
+  const beats = [];
+  for (const arc of project.arcs) {
+    if (arc.chapters.length > 0 && !arc.chapters.includes(chapterId)) {
+      continue;
+    }
+    for (const possibility of arc.softPossibilities) {
+      beats.push(typeof possibility === "string" ? possibility : String(possibility?.beat ?? ""));
+    }
+  }
+  for (const beat of scene ? scene.softBeats : []) {
+    beats.push(typeof beat === "string" ? beat : String(beat?.beat ?? ""));
+  }
+  return beats.filter(Boolean);
+}
+function buildWordBudget(options) {
+  const target = Number(options["word-target"] ?? options.words ?? 2500);
+  return {
+    min: Math.round(target * 0.8),
+    target,
+    max: Math.round(target * 1.25)
+  };
+}
+function findScene(project, chapterId, sceneNumber) {
+  const scenes = project.scenes.filter((scene) => scene.chapter === chapterId);
+  if (scenes.length === 0) {
+    return null;
+  }
+  if (sceneNumber === undefined || sceneNumber === "") {
+    return scenes[0];
+  }
+  return scenes.find((scene) => scene.scene === Number(sceneNumber)) ?? null;
+}
+function unique(values) {
+  return [...new Set(values)];
+}
+function chapterNumberFrom(chapterId) {
+  const parsed = Number(String(chapterId).replace(/[^0-9]/g, ""));
+  return Number.isInteger(parsed) ? parsed : 0;
+}
+
+// src/prose-diagnostics.js
+var MIN_PHRASE_WORDS = 5;
+var MAX_PHRASE_WORDS = 12;
+var MIN_OPENING_RUN = 3;
+var MIN_SHAPE_RUN = 4;
+var LENGTH_BAND = 5;
+var MIN_LENGTH_RUN = 4;
+function analyzeProse(chapters, options = {}) {
+  const limit = Number(options.limit ?? 10);
+  const perChapter = chapters.map((chapter) => {
+    const sentences = splitSentences(chapter.text);
+    const paragraphs = splitParagraphs(chapter.text);
+    return {
+      chapter: chapter.id,
+      words: countWords(chapter.text),
+      sentences: sentences.length,
+      paragraphs: paragraphs.length,
+      "repeated-phrases": repeatedPhrases(chapter.text, limit),
+      "opening-runs": openingRuns(sentences),
+      "length-runs": lengthRuns(sentences),
+      "shape-runs": shapeRuns(paragraphs),
+      dialogue: dialogueStats(chapter.text, sentences)
+    };
+  });
+  return {
+    chapters: perChapter,
+    "cross-chapter": {
+      "repeated-phrases": crossChapterPhrases(chapters, limit),
+      "ending-echoes": endingEchoes(chapters)
+    },
+    note: "Signals to look at, not a quality judgement. Repetition is sometimes deliberate."
+  };
+}
+function repeatedPhrases(text, limit) {
+  return rankPhrases(collectPhrases(normalizeWords(text)), limit).map(({ phrase, count }) => ({ phrase, count }));
+}
+function crossChapterPhrases(chapters, limit) {
+  const seen = new Map;
+  for (const chapter of chapters) {
+    const words = normalizeWords(chapter.text);
+    for (const [phrase, positions] of collectPhrases(words)) {
+      const entry = seen.get(phrase) ?? { count: 0, chapters: new Set };
+      entry.count += positions;
+      entry.chapters.add(chapter.id);
+      seen.set(phrase, entry);
+    }
+  }
+  const shared = [...seen.entries()].filter(([, entry]) => entry.chapters.size > 1).map(([phrase, entry]) => ({ phrase, count: entry.count, chapters: [...entry.chapters] })).sort((left, right) => right.phrase.length - left.phrase.length || right.count - left.count);
+  const kept = [];
+  for (const candidate of shared) {
+    if (!kept.some((item) => item.phrase.includes(candidate.phrase))) {
+      kept.push(candidate);
+    }
+    if (kept.length >= limit) {
+      break;
+    }
+  }
+  return kept;
+}
+function collectPhrases(words) {
+  const counts = new Map;
+  for (let size = MIN_PHRASE_WORDS;size <= MAX_PHRASE_WORDS; size += 1) {
+    for (let index = 0;index + size <= words.length; index += 1) {
+      const phrase = words.slice(index, index + size).join(" ");
+      counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+function rankPhrases(counts, limit) {
+  const repeated = [...counts.entries()].filter(([, count]) => count > 1).map(([phrase, count]) => ({ phrase, count })).sort((left, right) => right.phrase.length - left.phrase.length || right.count - left.count);
+  const kept = [];
+  for (const candidate of repeated) {
+    if (!kept.some((item) => item.phrase.includes(candidate.phrase) && item.count >= candidate.count)) {
+      kept.push(candidate);
+    }
+    if (kept.length >= limit) {
+      break;
+    }
+  }
+  return kept;
+}
+function openingRuns(sentences) {
+  const runs = [];
+  let start = 0;
+  for (let index = 1;index <= sentences.length; index += 1) {
+    const previous = firstWord(sentences[index - 1]);
+    const current = index < sentences.length ? firstWord(sentences[index]) : null;
+    if (current !== previous) {
+      const length = index - start;
+      if (length >= MIN_OPENING_RUN && previous) {
+        runs.push({ word: previous, length, "starts-at-sentence": start + 1 });
+      }
+      start = index;
+    }
+  }
+  return runs;
+}
+function lengthRuns(sentences) {
+  const lengths = sentences.map((sentence) => countWords(sentence));
+  const runs = [];
+  let start = 0;
+  while (start < lengths.length) {
+    let end = start + 1;
+    while (end < lengths.length) {
+      const window = lengths.slice(start, end + 1);
+      if (Math.max(...window) - Math.min(...window) > LENGTH_BAND) {
+        break;
+      }
+      end += 1;
+    }
+    const length = end - start;
+    if (length >= MIN_LENGTH_RUN) {
+      const band = lengths.slice(start, end);
+      runs.push({
+        length,
+        "starts-at-sentence": start + 1,
+        "word-range": [Math.min(...band), Math.max(...band)]
+      });
+      start = end;
+    } else {
+      start += 1;
+    }
+  }
+  return runs;
+}
+function shapeRuns(paragraphs) {
+  const shapes = paragraphs.map((paragraph) => splitSentences(paragraph).length);
+  const runs = [];
+  let start = 0;
+  for (let index = 1;index <= shapes.length; index += 1) {
+    if (index === shapes.length || shapes[index] !== shapes[start]) {
+      const length = index - start;
+      if (length >= MIN_SHAPE_RUN) {
+        runs.push({ length, "starts-at-paragraph": start + 1, "sentences-each": shapes[start] });
+      }
+      start = index;
+    }
+  }
+  return runs;
+}
+function endingEchoes(chapters) {
+  const endings = chapters.map((chapter) => {
+    const sentences = splitSentences(chapter.text);
+    const last = sentences[sentences.length - 1] ?? "";
+    return { chapter: chapter.id, sentence: last.trim(), opening: normalizeWords(last).slice(0, 3).join(" ") };
+  });
+  const echoes = [];
+  for (let left = 0;left < endings.length; left += 1) {
+    for (let right = left + 1;right < endings.length; right += 1) {
+      if (endings[left].opening && endings[left].opening === endings[right].opening) {
+        echoes.push({
+          chapters: [endings[left].chapter, endings[right].chapter],
+          "shared-opening": endings[left].opening
+        });
+      }
+    }
+  }
+  return { endings, echoes };
+}
+function dialogueStats(text, sentences) {
+  const lines = [...text.matchAll(/[""]([^""]{2,})[""]|"([^"]{2,})"/g)].map((match) => (match[1] ?? match[2] ?? "").trim()).filter(Boolean);
+  const totalWords = countWords(text);
+  const dialogueWords = lines.reduce((sum, line) => sum + countWords(line), 0);
+  const questions = lines.filter((line) => line.includes("?")).length;
+  const contractions = lines.filter((line) => /\w['']\w/.test(line)).length;
+  return {
+    lines: lines.length,
+    "share-of-words": totalWords === 0 ? 0 : round(dialogueWords / totalWords),
+    "mean-line-words": lines.length === 0 ? 0 : round(dialogueWords / lines.length),
+    "question-rate": lines.length === 0 ? 0 : round(questions / lines.length),
+    "contraction-rate": lines.length === 0 ? 0 : round(contractions / lines.length),
+    "narration-sentences": sentences.length - lines.length,
+    note: "Aggregate only. Per-speaker voice convergence needs a reader, not a counter."
+  };
+}
+function splitParagraphs(text) {
+  return text.split(/\r?\n\s*\r?\n/).map((paragraph) => paragraph.trim()).filter((paragraph) => paragraph !== "" && !/^#{1,6}\s/.test(paragraph) && !/^[*_-]{3,}$/.test(paragraph));
+}
+function splitSentences(text) {
+  return text.replace(/\s+/g, " ").split(/(?<=[.!?])["""']?\s+(?=[A-Z"""'])/).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "" && !/^#{1,6}\s/.test(sentence));
+}
+function normalizeWords(text) {
+  return text.toLowerCase().match(/[a-z0-9]+(?:[''][a-z]+)?/g) ?? [];
+}
+function countWords(text) {
+  return normalizeWords(text).length;
+}
+function firstWord(sentence) {
+  return normalizeWords(sentence)[0] ?? null;
+}
+function round(value) {
+  return Math.round(value * 100) / 100;
+}
+function formatProseReport(report) {
+  const newline = String.fromCharCode(10);
+  const lines = [];
+  for (const chapter of report.chapters) {
+    lines.push(`${chapter.chapter}: ${chapter.words} words, ${chapter.sentences} sentences, ${chapter.paragraphs} paragraphs`);
+    for (const phrase of chapter["repeated-phrases"]) {
+      lines.push(`  repeated x${phrase.count}: "${phrase.phrase}"`);
+    }
+    for (const run of chapter["opening-runs"]) {
+      lines.push(`  ${run.length} sentences in a row open with "${run.word}" (from sentence ${run["starts-at-sentence"]})`);
+    }
+    for (const run of chapter["length-runs"]) {
+      lines.push(`  ${run.length} sentences in a row of ${run["word-range"][0]}-${run["word-range"][1]} words (from sentence ${run["starts-at-sentence"]})`);
+    }
+    for (const run of chapter["shape-runs"]) {
+      lines.push(`  ${run.length} paragraphs in a row of ${run["sentences-each"]} sentence(s) (from paragraph ${run["starts-at-paragraph"]})`);
+    }
+    const dialogue = chapter.dialogue;
+    if (dialogue.lines > 0) {
+      lines.push(`  dialogue: ${dialogue.lines} lines, ${Math.round(dialogue["share-of-words"] * 100)}% of words, ${dialogue["mean-line-words"]} words per line`);
+    }
+  }
+  const cross = report["cross-chapter"];
+  if (cross["repeated-phrases"].length > 0) {
+    lines.push("across chapters:");
+    for (const phrase of cross["repeated-phrases"]) {
+      lines.push(`  repeated x${phrase.count} in ${phrase.chapters.join(", ")}: "${phrase.phrase}"`);
+    }
+  }
+  for (const echo of cross["ending-echoes"].echoes) {
+    lines.push(`  ${echo.chapters.join(" and ")} both end starting "${echo["shared-opening"]}"`);
+  }
+  lines.push("");
+  lines.push(report.note);
+  return `${lines.join(newline)}${newline}`;
+}
+
+// src/transactions.js
+import { createHash } from "node:crypto";
+import path6 from "node:path";
+
+// src/v3-templates.js
+function factIndex(storyId, facts) {
+  const rows = facts.length === 0 ? "| *No facts yet* | | | |" : facts.map((fact) => `| [${fact.id}](${fact.id}.md) | ${fact.truthStatus || ""} | ${fact.establishedIn || ""} | ${fact.resolvedIn || ""} |`).join(`
+`);
+  return `${stringifyFrontmatter({
+    type: "fact-registry",
+    story: storyId
+  })}# Facts
+
+Objective world truth. What is actually true in the fictional universe,
+independent of who knows it. Character belief lives in \`../knowledge/\`.
+
+| Fact | Truth | Established In | Resolved In |
+|------|-------|----------------|-------------|
+${rows}
+`;
+}
+function knowledgeIndex(storyId, records) {
+  const rows = records.length === 0 ? "| *No knowledge records yet* | |" : records.map((record) => `| [${record.character}](${record.character}.md) | ${record.facts.length} |`).join(`
+`);
+  return `${stringifyFrontmatter({
+    type: "knowledge-registry",
+    story: storyId
+  })}# Character Knowledge
+
+What each character knows, believes, suspects, doubts, or misbelieves about the
+facts in \`../facts/\`. One record per character.
+
+Deterministic checks cover reference integrity and ordering only. Whether prose
+semantically leaks knowledge is a semantic review task, not a mechanical one.
+
+| Character | Tracked Facts |
+|-----------|---------------|
+${rows}
+`;
+}
+function relationshipIndex(storyId, relationships) {
+  const rows = relationships.length === 0 ? "| *No relationships yet* | | |" : relationships.map((item) => `| [${item.id}](${item.id}.md) | ${item.participants.join(", ")} | ${item.lastMajorChange || ""} |`).join(`
+`);
+  return `${stringifyFrontmatter({
+    type: "relationship-registry",
+    story: storyId
+  })}# Relationships
+
+Qualitative relationship state between characters. Values are author-defined
+words, not scores.
+
+| Relationship | Participants | Last Major Change |
+|--------------|--------------|-------------------|
+${rows}
+`;
+}
+function stateIndex(storyId, snapshots) {
+  const rows = snapshots.length === 0 ? "| *No snapshots yet* | | |" : snapshots.map((snapshot) => `| [${snapshot.id}](${snapshot.id}.md) | ${snapshot.sequence} | ${snapshot.chapter || "pre-story"} |`).join(`
+`);
+  return `${stringifyFrontmatter({
+    type: "state-registry",
+    story: storyId
+  })}# State Snapshots
+
+One immutable snapshot per accepted chapter. Snapshots are append-only:
+previously accepted snapshots are never rewritten. \`current.md\` is generated
+and points at the latest accepted snapshot.
+
+| Snapshot | Sequence | Chapter |
+|----------|----------|---------|
+${rows}
+`;
+}
+function stateSnapshot(storyId, options = {}) {
+  const chapter = options.chapter ?? "";
+  const sequence = options.sequence ?? 0;
+  return `${stringifyFrontmatter({
+    type: "state-snapshot",
+    story: storyId,
+    chapter,
+    sequence,
+    provisional: options.provisional ? "true" : "false",
+    "story-time": options.storyTime ?? { date: "", time: "", elapsed: "" },
+    characters: options.characters ?? [],
+    objects: options.objects ?? [],
+    relationships: options.relationships ?? [],
+    "active-threads": options.activeThreads ?? [],
+    "reader-knowledge": options.readerKnowledge ?? []
+  })}# State After ${chapter || "Pre-Story"}
+
+${options.note ?? "Durable narrative state at the end of this chapter."}
+`;
+}
+function currentState(storyId, snapshot) {
+  return `${stringifyFrontmatter({
+    type: "state-current",
+    story: storyId,
+    chapter: snapshot ? snapshot.chapter : "",
+    sequence: snapshot ? snapshot.sequence : 0,
+    source: snapshot ? `${snapshot.id}.md` : ""
+  })}# Current State
+
+Generated pointer to the latest accepted state snapshot. Do not edit by hand;
+\`story reindex\` and chapter acceptance rewrite this file.
+
+${snapshot ? `See [${snapshot.id}.md](${snapshot.id}.md).` : "No accepted snapshot yet."}
+`;
+}
+function factFile(id, options = {}) {
+  return `${stringifyFrontmatter({
+    type: "fact",
+    id,
+    statement: options.statement ?? "",
+    "truth-status": options.truthStatus ?? "true",
+    "established-in": options.establishedIn ?? "",
+    "resolved-in": options.resolvedIn ?? "",
+    tags: options.tags ?? []
+  })}# ${options.statement || id}
+
+## Notes
+
+What is objectively true. Record who knows it in \`../knowledge/\`.
+`;
+}
+function knowledgeFile(character, facts = []) {
+  return `${stringifyFrontmatter({
+    type: "knowledge-record",
+    character,
+    facts
+  })}# Knowledge: ${character}
+
+## Notes
+
+Epistemic state only. Add one entry per fact this character has any relation to.
+`;
+}
+function relationshipFile(id, participants, options = {}) {
+  return `${stringifyFrontmatter({
+    type: "relationship",
+    id,
+    participants,
+    state: options.state ?? { trust: "", affection: "", resentment: "", dependency: "" },
+    "public-status": options.publicStatus ?? "",
+    "private-status": options.privateStatus ?? "",
+    "last-major-change": options.lastMajorChange ?? ""
+  })}# ${participants.join(" & ")}
+
+## Notes
+
+Qualitative state. Use author-defined words, not numeric scores.
+`;
+}
+function sealedArcPlan(arc, version, options = {}) {
+  return `${stringifyFrontmatter({
+    type: "sealed-arc-plan",
+    arc: arc.id,
+    "plan-version": version,
+    "sealed-at": options.now ?? new Date().toISOString(),
+    "source-sha256": options.sourceHash ?? "",
+    chapters: arc.chapters,
+    "dramatic-objective": arc.dramaticObjective,
+    "starting-state": arc.startingState,
+    "target-end-state": arc.targetEndState,
+    "hard-constraints": arc.hardConstraints,
+    "required-setups": arc.requiredSetups,
+    "required-payoffs": arc.requiredPayoffs,
+    "soft-possibilities": arc.softPossibilities,
+    "causal-chain": arc.causalChain
+  })}# Sealed Plan: ${arc.name} v${version}
+
+This is a frozen copy of the arc plan at the moment it was sealed. It is not
+edited in place. Changing the arc and sealing again produces v${version + 1},
+so every chapter plan can name the arc version it derives from.
+
+## Hard Constraints
+
+These must not be violated by any chapter in this arc.
+
+## Soft Possibilities
+
+Available to the prose model. None of them are mandatory.
+`;
+}
+
+// src/transactions.js
+var CANDIDATE_STATUSES = new Set(["pending", "accepted", "rejected"]);
+function planAcceptance(project, options = {}) {
+  const chapterId = String(options.chapter ?? "").trim();
+  const candidateId = String(options.candidate ?? "").trim();
+  const candidate = project.candidates.find((item) => item.chapter === chapterId && item.id === candidateId);
+  if (!candidate) {
+    throw new Error(`No candidate ${candidateId || "(unset)"} for ${chapterId || "(unset)"}`);
+  }
+  assertAcceptable(project, candidate);
+  const previous = previousSnapshot(project, candidate.number);
+  const snapshot = buildSnapshot(project, candidate, previous);
+  const knowledgeWrites = buildKnowledgeWrites(project, candidate);
+  const factWrites = buildFactWrites(project, candidate);
+  const promiseWrites = buildRecordWrites(project, candidate, "promise");
+  const questionWrites = buildRecordWrites(project, candidate, "question");
+  const chapterMarkdown = buildChapterMarkdown(candidate);
+  const bodyHash = hashBody(chapterMarkdown);
+  const transaction = {
+    chapter: candidate.chapter,
+    candidate: candidate.id,
+    "accepted-at": options.now ?? new Date().toISOString(),
+    source: {
+      "candidate-file": toPosix(path6.relative(project.root, candidate.file)),
+      "plan-version": candidate.planVersion || null,
+      "render-packet-version": candidate.renderPacketVersion || null
+    },
+    "body-sha256": bodyHash,
+    checks: {
+      structural: "pass",
+      continuity: "pass",
+      links: "pass",
+      review: candidate.review || "unrecorded"
+    },
+    "state-before": previous ? previous.id : null,
+    "state-after": candidate.chapter,
+    "state-delta": {
+      characters: candidate.stateCharacters,
+      objects: candidate.stateObjects,
+      relationships: candidate.stateRelationships,
+      "story-time": candidate.storyTime,
+      "active-threads": candidate.activeThreads
+    },
+    "knowledge-delta": candidate.knowledgeDelta,
+    "promise-delta": candidate.promiseDelta,
+    "question-delta": candidate.questionDelta
+  };
+  const writes = [
+    { file: path6.join(project.root, "chapters", `${candidate.chapter}.md`), contents: chapterMarkdown },
+    { file: path6.join(project.root, "continuity", "state", `${candidate.chapter}.md`), contents: snapshot },
+    ...knowledgeWrites,
+    ...factWrites,
+    ...promiseWrites,
+    ...questionWrites,
+    { file: path6.join(project.root, "plot", "timeline.md"), contents: appendTimelineRow(project, candidate) },
+    {
+      file: path6.join(project.root, "transactions", `${candidate.chapter}.json`),
+      contents: `${JSON.stringify(transaction, null, 2)}
+`
+    },
+    { file: candidate.file, contents: withCandidateStatus(candidate, "accepted") }
+  ];
+  return { candidate, transaction, writes, bodyHash, previous };
+}
+function planRejection(project, options = {}) {
+  const chapterId = String(options.chapter ?? "").trim();
+  const candidateId = String(options.candidate ?? "").trim();
+  const candidate = project.candidates.find((item) => item.chapter === chapterId && item.id === candidateId);
+  if (!candidate) {
+    throw new Error(`No candidate ${candidateId || "(unset)"} for ${chapterId || "(unset)"}`);
+  }
+  if (candidate.status === "accepted") {
+    throw new Error(`${candidate.id} was already accepted for ${candidate.chapter}`);
+  }
+  return {
+    candidate,
+    writes: [{
+      file: candidate.file,
+      contents: withCandidateStatus(candidate, "rejected", options.reason)
+    }]
+  };
+}
+function checkTransactions(project) {
+  const errors = [];
+  const warnings = [];
+  const chapters = new Map(project.chapters.map((chapter) => [chapter.id, chapter]));
+  for (const transaction of project.transactions) {
+    const label = toPosix(path6.relative(project.root, transaction.file));
+    if (transaction.data.chapter !== transaction.id) {
+      errors.push(`${label} records chapter ${transaction.data.chapter} but is filed as ${transaction.id}`);
+    }
+    const chapter = chapters.get(transaction.id);
+    if (!chapter) {
+      errors.push(`${label} has no canonical chapter ${transaction.id}`);
+      continue;
+    }
+    const actual = hashBody(chapter.rawMarkdown);
+    if (transaction.data["body-sha256"] !== actual) {
+      errors.push(`${label} body-sha256 does not match ${toPosix(path6.relative(project.root, chapter.file))}; the chapter changed after acceptance`);
+    }
+    const after = transaction.data["state-after"];
+    if (after && !project.stateSnapshots.some((snapshot) => snapshot.chapter === after)) {
+      errors.push(`${label} state-after ${after} has no state snapshot`);
+    }
+  }
+  for (const candidate of project.candidates) {
+    const label = toPosix(path6.relative(project.root, candidate.file));
+    if (candidate.status === "rejected" && chapters.has(candidate.chapter) && project.transactions.some((item) => item.id === candidate.chapter && item.data.candidate === candidate.id)) {
+      errors.push(`${label} is rejected but a transaction records it as accepted`);
+    }
+  }
+  for (const chapter of project.chapters) {
+    if (project.candidates.length > 0 && !project.transactions.some((item) => item.id === chapter.id)) {
+      warnings.push(`${toPosix(path6.relative(project.root, chapter.file))} is canonical but has no acceptance transaction`);
+    }
+  }
+  return { ok: errors.length === 0, errors, warnings };
+}
+function hashBody(markdown) {
+  const prose = chapterProse(markdown).replace(/\r\n/g, `
+`).trim();
+  return createHash("sha256").update(prose, "utf8").digest("hex");
+}
+function assertAcceptable(project, candidate) {
+  if (candidate.status === "rejected") {
+    throw new Error(`${candidate.id} is rejected and cannot be accepted`);
+  }
+  if (project.chapters.some((chapter) => chapter.id === candidate.chapter)) {
+    throw new Error(`${candidate.chapter} is already canonical; remove it before accepting another candidate`);
+  }
+  if (!Number.isInteger(candidate.number) || candidate.number < 1) {
+    throw new Error(`${candidate.id} must declare a positive chapter number`);
+  }
+  if (project.stateSnapshots.length === 0) {
+    throw new Error("Project has no state history; run story migrate before accepting chapters");
+  }
+  const latest = project.stateSnapshots[project.stateSnapshots.length - 1];
+  if (latest.sequence !== candidate.number - 1) {
+    throw new Error(`${candidate.chapter} must follow sequence ${latest.sequence}, not ${candidate.number - 1}`);
+  }
+  const characters = new Set(project.characters.map((item) => item.id));
+  const locations = new Set(project.locations.map((item) => item.id));
+  const artifacts = new Set(project.artifacts.map((item) => item.id));
+  const factions = new Set(project.factions.map((item) => item.id));
+  const facts = new Set(project.facts.map((item) => item.id));
+  const promises = new Set(project.promises.map((item) => item.id));
+  const questions = new Set(project.questions.map((item) => item.id));
+  requireAll(candidate.characters, characters, "character");
+  requireAll(candidate.locations, locations, "location");
+  if (candidate.pov && !characters.has(candidate.pov)) {
+    throw new Error(`Unknown POV character: ${candidate.pov}`);
+  }
+  for (const entry of candidate.stateCharacters) {
+    requireOne(entry.id, characters, "character");
+    if (entry.location) {
+      requireOne(entry.location, locations, "location");
+    }
+  }
+  for (const entry of candidate.stateObjects) {
+    requireOne(entry.id, artifacts, "artifact");
+    if (entry.owner && !characters.has(entry.owner) && !factions.has(entry.owner)) {
+      throw new Error(`Unknown owner: ${entry.owner}`);
+    }
+    if (entry.location) {
+      requireOne(entry.location, locations, "location");
+    }
+  }
+  for (const entry of candidate.knowledgeDelta) {
+    requireOne(entry.character, characters, "character");
+    requireOne(entry.fact, facts, "fact");
+    if (!EPISTEMIC_STATUSES.has(entry.status)) {
+      throw new Error(`Unknown epistemic status: ${entry.status}`);
+    }
+    if (entry.confidence && !CONFIDENCE_LEVELS.has(entry.confidence)) {
+      throw new Error(`Unknown confidence: ${entry.confidence}`);
+    }
+    const learned = entry["learned-in"];
+    if (learned && learned !== PRE_STORY2 && learned !== candidate.chapter) {
+      throw new Error(`${entry.character} cannot learn ${entry.fact} in ${learned} while accepting ${candidate.chapter}`);
+    }
+    if (entry.status === "unknown" && learned) {
+      throw new Error(`${entry.character} cannot be unknown on ${entry.fact} and record learned-in`);
+    }
+  }
+  for (const entry of candidate.promiseDelta) {
+    requireOne(entry.promise, promises, "promise");
+  }
+  for (const entry of candidate.questionDelta) {
+    requireOne(entry.question, questions, "question");
+  }
+}
+function requireAll(values, allowed, label) {
+  for (const value of values) {
+    requireOne(value, allowed, label);
+  }
+}
+function requireOne(value, allowed, label) {
+  if (!value || !allowed.has(value)) {
+    throw new Error(`Unknown ${label}: ${value || "(unset)"}`);
+  }
+}
+function previousSnapshot(project, number) {
+  return project.stateSnapshots.find((snapshot) => snapshot.sequence === number - 1) ?? null;
+}
+function buildSnapshot(project, candidate, previous) {
+  return stateSnapshot(project.storyId, {
+    chapter: candidate.chapter,
+    sequence: candidate.number,
+    storyTime: Object.keys(candidate.storyTime).length > 0 ? candidate.storyTime : previous ? previous.storyTime : {},
+    characters: mergeById(previous ? previous.characters : [], candidate.stateCharacters),
+    objects: mergeById(previous ? previous.objects : [], candidate.stateObjects),
+    relationships: mergeById(previous ? previous.relationships : [], candidate.stateRelationships),
+    activeThreads: candidate.activeThreads.length > 0 ? candidate.activeThreads : previous ? previous.activeThreads : [],
+    readerKnowledge: candidate.readerKnowledge.length > 0 ? candidate.readerKnowledge : previous ? previous.readerKnowledge : [],
+    note: `Durable state after ${candidate.chapter}.`
+  });
+}
+function mergeById(previous, delta) {
+  const merged = new Map;
+  for (const entry of previous) {
+    if (entry && entry.id) {
+      merged.set(entry.id, { ...entry });
+    }
+  }
+  for (const entry of delta) {
+    if (entry && entry.id) {
+      merged.set(entry.id, { ...merged.get(entry.id) ?? {}, ...entry });
+    }
+  }
+  return [...merged.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+}
+function buildKnowledgeWrites(project, candidate) {
+  const byCharacter = new Map;
+  for (const entry of candidate.knowledgeDelta) {
+    const list = byCharacter.get(entry.character) ?? [];
+    list.push(entry);
+    byCharacter.set(entry.character, list);
+  }
+  const writes = [];
+  for (const [character, entries] of byCharacter) {
+    const record = project.knowledge.find((item) => item.character === character);
+    const existing = record ? record.facts.filter((item) => !entries.some((entry) => entry.fact === item.fact)) : [];
+    const facts = existing.concat(entries.map((entry) => {
+      const next = { fact: entry.fact, status: entry.status };
+      if (entry["learned-in"]) {
+        next["learned-in"] = entry["learned-in"];
+      }
+      if (entry.confidence) {
+        next.confidence = entry.confidence;
+      }
+      if (entry.source) {
+        next.source = entry.source;
+      }
+      return next;
+    })).sort((left, right) => String(left.fact).localeCompare(String(right.fact)));
+    const file = record ? record.file : path6.join(project.root, "continuity", "knowledge", `${character}.md`);
+    const contents = record ? replaceFrontmatter(record.rawMarkdown, { ...record.rawData, facts }) : `${stringifyFrontmatter({ type: "knowledge-record", character, facts })}# Knowledge: ${character}
+`;
+    writes.push({ file, contents });
+  }
+  return writes;
+}
+function buildFactWrites(project, candidate) {
+  const writes = [];
+  const stamped = new Set;
+  for (const entry of candidate.knowledgeDelta) {
+    if (entry["learned-in"] !== candidate.chapter || stamped.has(entry.fact)) {
+      continue;
+    }
+    const fact = project.facts.find((item) => item.id === entry.fact);
+    if (!fact || fact.establishedIn) {
+      continue;
+    }
+    stamped.add(entry.fact);
+    writes.push({
+      file: fact.file,
+      contents: replaceFrontmatter(fact.rawMarkdown, {
+        ...fact.rawData,
+        "established-in": candidate.chapter
+      })
+    });
+  }
+  return writes;
+}
+function buildRecordWrites(project, candidate, kind) {
+  const delta = kind === "promise" ? candidate.promiseDelta : candidate.questionDelta;
+  const records = kind === "promise" ? project.promises : project.questions;
+  const writes = [];
+  for (const entry of delta) {
+    const id = entry[kind];
+    const record = records.find((item) => item.id === id);
+    if (!record) {
+      continue;
+    }
+    const next = { ...record.rawData };
+    if (entry.status) {
+      next.status = entry.status;
+    }
+    for (const field of kind === "promise" ? ["planted", "payoff"] : ["introduced", "resolved"]) {
+      if (entry[field]) {
+        next[field] = entry[field];
+      }
+    }
+    writes.push({ file: record.file, contents: replaceFrontmatter(record.rawMarkdown, next) });
+  }
+  return writes;
+}
+function buildChapterMarkdown(candidate) {
+  const body = candidate.body.startsWith(`
+`) ? candidate.body : `
+${candidate.body}`;
+  const frontmatter = {
+    title: candidate.title,
+    number: candidate.number,
+    status: "draft",
+    "word-count": wordCount(chapterProse(body)),
+    pov: candidate.pov,
+    characters: candidate.characters,
+    mentions: candidate.mentions,
+    locations: candidate.locations,
+    "arcs-advanced": candidate.arcsAdvanced
+  };
+  return `${stringifyFrontmatter(frontmatter)}${body.replace(/^\n/, "")}`;
+}
+function appendTimelineRow(project, candidate) {
+  const markdown = project.timeline;
+  const when = candidate.storyTime.date || candidate.storyTime.time || "unrecorded";
+  const arcs = candidate.arcsAdvanced.join(", ");
+  const row = `| ${when} | ${candidate.title} | ${arcs} | ${candidate.chapter} |`;
+  if (markdown.includes("| *No events yet* | | | |")) {
+    return markdown.replace("| *No events yet* | | | |", row);
+  }
+  return markdown.endsWith(`
+`) ? `${markdown}${row}
+` : `${markdown}
+${row}
+`;
+}
+function withCandidateStatus(candidate, status, reason) {
+  const next = { ...candidate.rawData, status };
+  if (reason) {
+    next["review-note"] = String(reason);
+  }
+  return replaceFrontmatter(candidate.rawMarkdown, next);
+}
+function toPosix(value) {
+  return value.split(path6.sep).join("/");
+}
+
+// src/state.js
+import path7 from "node:path";
+function checkStateSnapshots(project) {
+  const errors = [];
+  const warnings = [];
+  if (project.stateSnapshots.length === 0) {
+    if (project.currentState) {
+      errors.push(`${currentLabel()} exists but there are no state snapshots`);
+    }
+    return { ok: errors.length === 0, errors, warnings };
+  }
+  checkSequence(project, errors);
+  checkChapterBinding(project, errors, warnings);
+  checkSnapshotContents(project, errors, warnings);
+  checkCurrentPointer(project, errors);
+  return { ok: errors.length === 0, errors, warnings };
+}
+function resolveCurrentSnapshot(project) {
+  if (project.stateSnapshots.length === 0) {
+    return null;
+  }
+  return project.stateSnapshots[project.stateSnapshots.length - 1];
+}
+function checkSequence(project, errors) {
+  let expected = 0;
+  for (const snapshot of project.stateSnapshots) {
+    const label = relative5(project, snapshot.file);
+    if (!Number.isInteger(snapshot.sequence) || snapshot.sequence < 0) {
+      errors.push(`${label} sequence must be a non-negative integer`);
+      continue;
+    }
+    if (snapshot.sequence < expected) {
+      errors.push(`${label} sequence ${snapshot.sequence} duplicates or precedes an earlier snapshot`);
+    } else if (snapshot.sequence > expected) {
+      errors.push(`${label} sequence ${snapshot.sequence} skips ${expected}; state history has a gap`);
+    }
+    expected = snapshot.sequence + 1;
+  }
+  const first = project.stateSnapshots[0];
+  if (first && first.sequence !== 0) {
+    errors.push(`${relative5(project, first.file)} is the first snapshot but does not start at sequence 0`);
+  }
+}
+function checkChapterBinding(project, errors, warnings) {
+  const chapters = new Map(project.chapters.map((chapter) => [chapter.id, chapter]));
+  const covered = new Set;
+  for (const snapshot of project.stateSnapshots) {
+    const label = relative5(project, snapshot.file);
+    if (snapshot.sequence === 0) {
+      if (snapshot.chapter) {
+        errors.push(`${label} is the pre-story snapshot and must not name a chapter`);
+      }
+      continue;
+    }
+    if (!snapshot.chapter) {
+      errors.push(`${label} is missing chapter`);
+      continue;
+    }
+    const chapter = chapters.get(snapshot.chapter);
+    if (!chapter) {
+      errors.push(`${label} references missing chapter ${snapshot.chapter}; a snapshot may only exist for a canonical chapter`);
+      continue;
+    }
+    if (covered.has(snapshot.chapter)) {
+      errors.push(`${label} is a second snapshot for ${snapshot.chapter}`);
+    }
+    covered.add(snapshot.chapter);
+    if (chapter.number !== snapshot.sequence) {
+      errors.push(`${label} sequence ${snapshot.sequence} does not match chapter number ${chapter.number}`);
+    }
+  }
+  for (const chapter of project.chapters) {
+    if (!covered.has(chapter.id)) {
+      warnings.push(`${relative5(project, chapter.file)} is canonical but has no state snapshot; accept the chapter or add continuity/state/${chapter.id}.md`);
+    }
+  }
+}
+function checkSnapshotContents(project, errors, warnings) {
+  const characters = new Set(project.characters.map((item) => item.id));
+  const locations = new Set(project.locations.map((item) => item.id));
+  const artifacts = new Set(project.artifacts.map((item) => item.id));
+  const factions = new Set(project.factions.map((item) => item.id));
+  const relationships = new Set(project.relationships.map((item) => item.id));
+  for (const snapshot of project.stateSnapshots) {
+    const label = relative5(project, snapshot.file);
+    for (const [index, entry] of snapshot.characters.entries()) {
+      const entryLabel = `${label} characters[${index}]`;
+      if (!requireMapping2(entry, entryLabel, errors)) {
+        continue;
+      }
+      if (!entry.id || !characters.has(entry.id)) {
+        errors.push(`${entryLabel} references missing character ${entry.id || "(unset)"}`);
+      }
+      if (entry.location && !locations.has(entry.location)) {
+        errors.push(`${entryLabel} references missing location ${entry.location}`);
+      }
+    }
+    for (const [index, entry] of snapshot.objects.entries()) {
+      const entryLabel = `${label} objects[${index}]`;
+      if (!requireMapping2(entry, entryLabel, errors)) {
+        continue;
+      }
+      if (!entry.id || !artifacts.has(entry.id)) {
+        errors.push(`${entryLabel} references missing artifact ${entry.id || "(unset)"}`);
+      }
+      if (entry.owner && !characters.has(entry.owner) && !factions.has(entry.owner)) {
+        errors.push(`${entryLabel} references missing owner ${entry.owner}`);
+      }
+      if (entry.location && !locations.has(entry.location)) {
+        errors.push(`${entryLabel} references missing location ${entry.location}`);
+      }
+    }
+    for (const [index, entry] of snapshot.relationships.entries()) {
+      const entryLabel = `${label} relationships[${index}]`;
+      if (!requireMapping2(entry, entryLabel, errors)) {
+        continue;
+      }
+      if (!entry.id) {
+        errors.push(`${entryLabel} is missing id`);
+      } else if (relationships.size > 0 && !relationships.has(entry.id)) {
+        warnings.push(`${entryLabel} references relationship ${entry.id} with no record in continuity/relationships/`);
+      }
+    }
+  }
+}
+function checkCurrentPointer(project, errors) {
+  const label = currentLabel();
+  const latest = resolveCurrentSnapshot(project);
+  if (!project.currentState) {
+    errors.push(`${label} is missing; it must point at ${latest.id}`);
+    return;
+  }
+  const data = project.currentState.data;
+  if (data.chapter !== latest.chapter) {
+    errors.push(`${label} chapter ${data.chapter || "(unset)"} is not the latest accepted chapter ${latest.chapter || "(pre-story)"}`);
+  }
+  if (data.sequence !== latest.sequence) {
+    errors.push(`${label} sequence ${data.sequence ?? "(unset)"} is not the latest sequence ${latest.sequence}`);
+  }
+  const expectedSource = `${latest.id}.md`;
+  if (data.source && data.source !== expectedSource) {
+    errors.push(`${label} source ${data.source} is not ${expectedSource}`);
+  }
+}
+function requireMapping2(entry, entryLabel, errors) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    errors.push(`${entryLabel} must be a mapping`);
+    return false;
+  }
+  return true;
+}
+function currentLabel() {
+  return path7.join("continuity", "state", "current.md");
+}
+function relative5(project, file) {
+  return path7.relative(project.root, file);
+}
+
 // src/story.js
-var STORY_SCHEMA_VERSION = 2;
+var STORY_SCHEMA_VERSION = 3;
+var LEGACY_SCHEMA_VERSIONS = new Set([2]);
+var V3_DIRECTORIES = [
+  path8.join("continuity", "facts"),
+  path8.join("continuity", "knowledge"),
+  path8.join("continuity", "relationships"),
+  path8.join("continuity", "state")
+];
 var REQUIRED_PATHS = [
   "story.md",
   "characters/_index.md",
@@ -449,15 +2344,28 @@ var REQUIRED_PATHS = [
   "glossary/terms"
 ];
 var INDEX_SCHEMAS = [
-  [path2.join("characters", "_index.md"), "character-registry"],
-  [path2.join("worldbuilding", "_index.md"), "world-registry"],
-  [path2.join("plot", "_index.md"), "plot-registry"],
-  [path2.join("plot", "timeline.md"), "timeline"],
-  [path2.join("chapters", "_index.md"), "chapter-registry"],
-  [path2.join("scenes", "_index.md"), "scene-registry"],
-  [path2.join("continuity", "questions", "_index.md"), "question-registry"],
-  [path2.join("continuity", "promises", "_index.md"), "promise-registry"],
-  [path2.join("glossary", "_index.md"), "glossary-registry"]
+  [path8.join("characters", "_index.md"), "character-registry"],
+  [path8.join("worldbuilding", "_index.md"), "world-registry"],
+  [path8.join("plot", "_index.md"), "plot-registry"],
+  [path8.join("plot", "timeline.md"), "timeline"],
+  [path8.join("chapters", "_index.md"), "chapter-registry"],
+  [path8.join("scenes", "_index.md"), "scene-registry"],
+  [path8.join("continuity", "questions", "_index.md"), "question-registry"],
+  [path8.join("continuity", "promises", "_index.md"), "promise-registry"],
+  [path8.join("glossary", "_index.md"), "glossary-registry"]
+];
+var CHARACTER_CAUSALITY_FIELDS = [
+  "external-goal",
+  "internal-need",
+  "fear",
+  "false-belief",
+  "private-information",
+  "dependencies",
+  "leverage",
+  "contradictions",
+  "stress-response",
+  "speech-principle",
+  "avoidance-pattern"
 ];
 var STORY_STATUSES = new Set(["planning", "drafting", "in-progress", "revising", "complete", "abandoned"]);
 var STORY_TENSES = new Set(["past", "present", "future", "mixed"]);
@@ -508,23 +2416,23 @@ function createStoryProject(options) {
     throw new Error("A story title is required");
   }
   const storyId = kebabCase(title);
-  const root = path2.resolve(options.cwd ?? process.cwd(), options.dir ?? storyId);
-  if (fs.existsSync(root) && !options.force) {
+  const root = path8.resolve(options.cwd ?? process.cwd(), options.dir ?? storyId);
+  if (fs2.existsSync(root) && !options.force) {
     throw new Error(`${root} already exists. Use --force to overwrite starter files.`);
   }
   const themes = normalizeList(options.themes, ["change"]);
-  fs.mkdirSync(path2.join(root, "characters"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "worldbuilding", "locations"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "worldbuilding", "systems"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "worldbuilding", "factions"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "worldbuilding", "artifacts"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "plot", "arcs"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "chapters"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "scenes"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "continuity", "questions"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "continuity", "promises"), { recursive: true });
-  fs.mkdirSync(path2.join(root, "glossary", "terms"), { recursive: true });
-  writeFile(path2.join(root, "story.md"), storyBible({
+  fs2.mkdirSync(path8.join(root, "characters"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "worldbuilding", "locations"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "worldbuilding", "systems"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "worldbuilding", "factions"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "worldbuilding", "artifacts"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "plot", "arcs"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "chapters"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "scenes"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "continuity", "questions"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "continuity", "promises"), { recursive: true });
+  fs2.mkdirSync(path8.join(root, "glossary", "terms"), { recursive: true });
+  writeFile(path8.join(root, "story.md"), storyBible({
     title,
     storyId,
     genre: options.genre ?? "fiction",
@@ -535,22 +2443,23 @@ function createStoryProject(options) {
     tense: options.tense ?? "past",
     synopsis: options.synopsis ?? "Add a 2-3 sentence synopsis here."
   }), { root });
-  writeFile(path2.join(root, "characters", "_index.md"), characterIndex(storyId, [], "", ""), { root });
-  writeFile(path2.join(root, "worldbuilding", "_index.md"), worldIndex(storyId, [], [], [], [], ""), { root });
-  writeFile(path2.join(root, "plot", "_index.md"), plotIndex(storyId, "three-act", [], "", ""), { root });
-  writeFile(path2.join(root, "plot", "timeline.md"), timeline(storyId), { root });
-  writeFile(path2.join(root, "chapters", "_index.md"), chapterIndex(storyId, []), { root });
-  writeFile(path2.join(root, "scenes", "_index.md"), sceneIndex(storyId, []), { root });
-  writeFile(path2.join(root, "continuity", "state.md"), continuityState(storyId), { root });
-  writeFile(path2.join(root, "continuity", "questions", "_index.md"), questionIndex(storyId, []), { root });
-  writeFile(path2.join(root, "continuity", "promises", "_index.md"), promiseIndex(storyId, []), { root });
-  writeFile(path2.join(root, "glossary", "_index.md"), glossaryIndex(storyId, []), { root });
+  writeFile(path8.join(root, "characters", "_index.md"), characterIndex(storyId, [], "", ""), { root });
+  writeFile(path8.join(root, "worldbuilding", "_index.md"), worldIndex(storyId, [], [], [], [], ""), { root });
+  writeFile(path8.join(root, "plot", "_index.md"), plotIndex(storyId, "three-act", [], "", ""), { root });
+  writeFile(path8.join(root, "plot", "timeline.md"), timeline(storyId), { root });
+  writeFile(path8.join(root, "chapters", "_index.md"), chapterIndex(storyId, []), { root });
+  writeFile(path8.join(root, "scenes", "_index.md"), sceneIndex(storyId, []), { root });
+  writeFile(path8.join(root, "continuity", "state.md"), continuityState(storyId), { root });
+  writeFile(path8.join(root, "continuity", "questions", "_index.md"), questionIndex(storyId, []), { root });
+  writeFile(path8.join(root, "continuity", "promises", "_index.md"), promiseIndex(storyId, []), { root });
+  writeFile(path8.join(root, "glossary", "_index.md"), glossaryIndex(storyId, []), { root });
+  migrateToV3(root, storyId, []);
   return { root, storyId, files: REQUIRED_PATHS.filter((entry) => entry.endsWith(".md")) };
 }
 function scanProject(root) {
-  const projectRoot = path2.resolve(root);
-  const story = readMarkdown(path2.join(projectRoot, "story.md"), projectRoot);
-  const storyId = kebabCase(story.data.title ?? path2.basename(projectRoot));
+  const projectRoot = path8.resolve(root);
+  const story = readMarkdown(path8.join(projectRoot, "story.md"), projectRoot);
+  const storyId = kebabCase(story.data.title ?? path8.basename(projectRoot));
   return {
     root: projectRoot,
     story,
@@ -563,9 +2472,10 @@ function scanProject(root) {
       status: data.status ?? "",
       diedIn: data["died-in"] ?? "",
       relationships: asArray(data.relationships),
-      locations: asArray(data.locations)
+      locations: asArray(data.locations),
+      causality: Object.fromEntries(CHARACTER_CAUSALITY_FIELDS.filter((field) => data[field] !== undefined && data[field] !== "").map((field) => [field, data[field]]))
     })),
-    locations: readEntityFiles(projectRoot, path2.join("worldbuilding", "locations"), (id, file, data) => ({
+    locations: readEntityFiles(projectRoot, path8.join("worldbuilding", "locations"), (id, file, data) => ({
       id,
       file,
       name: data.name ?? titleCaseSlug(id),
@@ -573,13 +2483,13 @@ function scanProject(root) {
       region: data.region ?? "",
       notableCharacters: asArray(data["notable-characters"])
     })),
-    systems: readEntityFiles(projectRoot, path2.join("worldbuilding", "systems"), (id, file, data) => ({
+    systems: readEntityFiles(projectRoot, path8.join("worldbuilding", "systems"), (id, file, data) => ({
       id,
       file,
       name: data.name ?? titleCaseSlug(id),
       type: data.type ?? ""
     })),
-    factions: readEntityFiles(projectRoot, path2.join("worldbuilding", "factions"), (id, file, data) => ({
+    factions: readEntityFiles(projectRoot, path8.join("worldbuilding", "factions"), (id, file, data) => ({
       id,
       file,
       name: data.name ?? titleCaseSlug(id),
@@ -588,7 +2498,7 @@ function scanProject(root) {
       members: asArray(data.members),
       locations: asArray(data.locations)
     })),
-    artifacts: readEntityFiles(projectRoot, path2.join("worldbuilding", "artifacts"), (id, file, data) => ({
+    artifacts: readEntityFiles(projectRoot, path8.join("worldbuilding", "artifacts"), (id, file, data) => ({
       id,
       file,
       name: data.name ?? titleCaseSlug(id),
@@ -597,14 +2507,41 @@ function scanProject(root) {
       owner: data.owner ?? "",
       location: data.location ?? ""
     })),
-    arcs: readEntityFiles(projectRoot, path2.join("plot", "arcs"), (id, file, data) => ({
+    arcs: readEntityFiles(projectRoot, path8.join("plot", "arcs"), (id, file, data, markdown) => ({
       id,
       file,
       name: data.name ?? titleCaseSlug(id),
       type: data.type ?? "",
       status: data.status ?? "",
       characters: asArray(data.characters),
-      themes: asArray(data.themes)
+      themes: asArray(data.themes),
+      chapters: asArray(data.chapters),
+      planVersion: Number(data["plan-version"] ?? 0),
+      sealedVersion: data["sealed-version"] ?? "",
+      dramaticObjective: data["dramatic-objective"] ?? "",
+      startingState: data["starting-state"] ?? "",
+      targetEndState: data["target-end-state"] ?? "",
+      hardConstraints: asArray(data["hard-constraints"]),
+      requiredSetups: asArray(data["required-setups"]),
+      requiredPayoffs: asArray(data["required-payoffs"]),
+      softPossibilities: asArray(data["soft-possibilities"]),
+      causalChain: asArray(data["causal-chain"]),
+      arcCharacters: asArray(data["arc-characters"]),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
+    })),
+    sealedArcs: readEntityFiles(projectRoot, path8.join("plot", "arcs", "sealed"), (id, file, data) => ({
+      id,
+      file,
+      arc: data.arc ?? "",
+      version: Number(data["plan-version"] ?? 0),
+      chapters: asArray(data.chapters),
+      dramaticObjective: data["dramatic-objective"] ?? "",
+      hardConstraints: asArray(data["hard-constraints"]),
+      requiredSetups: asArray(data["required-setups"]),
+      requiredPayoffs: asArray(data["required-payoffs"]),
+      softPossibilities: asArray(data["soft-possibilities"]),
+      rawData: data
     })),
     chapters: readEntityFiles(projectRoot, "chapters", (id, file, data, markdown) => ({
       id,
@@ -618,7 +2555,8 @@ function scanProject(root) {
       locations: asArray(data.locations),
       arcsAdvanced: asArray(data["arcs-advanced"]),
       declaredWordCount: Number(data["word-count"] ?? 0),
-      wordCount: wordCount(chapterProse(markdown.body))
+      wordCount: wordCount(chapterProse(markdown.body)),
+      rawMarkdown: markdown.rawMarkdown
     })).sort((left, right) => left.number - right.number || left.file.localeCompare(right.file)),
     scenes: readEntityFiles(projectRoot, "scenes", (id, file, data) => ({
       id,
@@ -632,18 +2570,29 @@ function scanProject(root) {
       characters: asArray(data.characters),
       mentions: asArray(data.mentions),
       arcsAdvanced: asArray(data["arcs-advanced"]),
-      stateChanges: asArray(data["state-changes"])
+      stateChanges: asArray(data["state-changes"]),
+      objective: data.objective ?? "",
+      opposition: data.opposition ?? "",
+      turn: data.turn ?? "",
+      exitConsequence: data["exit-consequence"] ?? "",
+      emotionalPressure: data["emotional-pressure"] ?? "",
+      hardConstraints: asArray(data["hard-constraints"]),
+      softBeats: asArray(data["soft-beats"]),
+      knowledgeChanges: asArray(data["knowledge-changes"]),
+      relationshipChanges: asArray(data["relationship-changes"])
     })).sort((left, right) => left.chapter.localeCompare(right.chapter) || left.scene - right.scene || left.file.localeCompare(right.file)),
-    questions: readEntityFiles(projectRoot, path2.join("continuity", "questions"), (id, file, data) => ({
+    questions: readEntityFiles(projectRoot, path8.join("continuity", "questions"), (id, file, data, markdown) => ({
       id,
       file,
       title: data.title ?? titleCaseSlug(id),
       status: data.status ?? "",
       introduced: data.introduced ?? "",
       resolved: data.resolved ?? "",
-      characters: asArray(data.characters)
+      characters: asArray(data.characters),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
     })),
-    promises: readEntityFiles(projectRoot, path2.join("continuity", "promises"), (id, file, data) => ({
+    promises: readEntityFiles(projectRoot, path8.join("continuity", "promises"), (id, file, data, markdown) => ({
       id,
       file,
       title: data.title ?? titleCaseSlug(id),
@@ -651,24 +2600,76 @@ function scanProject(root) {
       planted: data.planted ?? "",
       payoff: data.payoff ?? "",
       arcs: asArray(data.arcs),
-      characters: asArray(data.characters)
+      characters: asArray(data.characters),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
     })),
-    glossaryTerms: readEntityFiles(projectRoot, path2.join("glossary", "terms"), (id, file, data) => ({
+    glossaryTerms: readEntityFiles(projectRoot, path8.join("glossary", "terms"), (id, file, data) => ({
       id,
       file,
       term: data.term ?? titleCaseSlug(id),
       category: data.category ?? "",
       aliases: asArray(data.aliases)
     })),
-    continuity: fs.existsSync(path2.join(projectRoot, "continuity", "state.md")) ? readMarkdown(path2.join(projectRoot, "continuity", "state.md"), projectRoot) : null
+    facts: readEntityFiles(projectRoot, path8.join("continuity", "facts"), (id, file, data, markdown) => ({
+      id,
+      file,
+      declaredId: data.id ?? "",
+      statement: data.statement ?? "",
+      truthStatus: String(data["truth-status"] ?? ""),
+      establishedIn: data["established-in"] ?? "",
+      resolvedIn: data["resolved-in"] ?? "",
+      tags: asArray(data.tags),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
+    })),
+    knowledge: readEntityFiles(projectRoot, path8.join("continuity", "knowledge"), (id, file, data, markdown) => ({
+      id,
+      file,
+      declaredCharacter: data.character ?? "",
+      character: data.character || id,
+      facts: asArray(data.facts),
+      rawData: data,
+      rawMarkdown: markdown.rawMarkdown
+    })),
+    relationships: readEntityFiles(projectRoot, path8.join("continuity", "relationships"), (id, file, data) => ({
+      id,
+      file,
+      declaredId: data.id ?? "",
+      participants: asArray(data.participants),
+      state: asMapping(data.state),
+      publicStatus: data["public-status"] ?? "",
+      privateStatus: data["private-status"] ?? "",
+      lastMajorChange: data["last-major-change"] ?? "",
+      rawData: data
+    })),
+    stateSnapshots: readEntityFiles(projectRoot, path8.join("continuity", "state"), (id, file, data) => ({
+      id,
+      file,
+      chapter: data.chapter ?? "",
+      sequence: Number(data.sequence ?? 0),
+      provisional: String(data.provisional ?? "false") === "true",
+      storyTime: asMapping(data["story-time"]),
+      characters: asArray(data.characters),
+      objects: asArray(data.objects),
+      relationships: asArray(data.relationships),
+      activeThreads: asArray(data["active-threads"]),
+      readerKnowledge: asArray(data["reader-knowledge"]),
+      rawData: data
+    })).filter((snapshot) => snapshot.id !== "current").sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id)),
+    candidates: readCandidates(projectRoot),
+    transactions: readTransactions(projectRoot),
+    timeline: safeRead(path8.join(projectRoot, "plot", "timeline.md"), projectRoot),
+    currentState: fs2.existsSync(path8.join(projectRoot, "continuity", "state", "current.md")) ? readMarkdown(path8.join(projectRoot, "continuity", "state", "current.md"), projectRoot) : null,
+    continuity: fs2.existsSync(path8.join(projectRoot, "continuity", "state.md")) ? readMarkdown(path8.join(projectRoot, "continuity", "state.md"), projectRoot) : null
   };
 }
 function validateProject(root) {
-  const projectRoot = path2.resolve(root);
+  const projectRoot = path8.resolve(root);
   const errors = [];
   const warnings = [];
   for (const requiredPath of REQUIRED_PATHS) {
-    if (!fs.existsSync(path2.join(projectRoot, requiredPath))) {
+    if (!fs2.existsSync(path8.join(projectRoot, requiredPath))) {
       errors.push(`Missing required path: ${requiredPath}`);
     }
   }
@@ -690,18 +2691,19 @@ function validateProject(root) {
   validateQuestions(project, errors);
   validatePromises(project, errors);
   validateGlossaryTerms(project, errors);
+  validateV3Structure(project, errors);
   const indexChecks = [
-    [path2.join("characters", "_index.md"), project.characters.map((item) => `](${item.id}.md)`)],
-    [path2.join("worldbuilding", "_index.md"), project.locations.map((item) => `](locations/${item.id}.md)`).concat(project.systems.map((item) => `](systems/${item.id}.md)`)).concat(project.factions.map((item) => `](factions/${item.id}.md)`)).concat(project.artifacts.map((item) => `](artifacts/${item.id}.md)`))],
-    [path2.join("plot", "_index.md"), project.arcs.map((item) => `](arcs/${item.id}.md)`)],
-    [path2.join("chapters", "_index.md"), project.chapters.map((item) => `](${path2.basename(item.file)})`)],
-    [path2.join("scenes", "_index.md"), project.scenes.map((item) => `](${item.id}.md)`)],
-    [path2.join("continuity", "questions", "_index.md"), project.questions.map((item) => `](${item.id}.md)`)],
-    [path2.join("continuity", "promises", "_index.md"), project.promises.map((item) => `](${item.id}.md)`)],
-    [path2.join("glossary", "_index.md"), project.glossaryTerms.map((item) => `](terms/${item.id}.md)`)]
+    [path8.join("characters", "_index.md"), project.characters.map((item) => `](${item.id}.md)`)],
+    [path8.join("worldbuilding", "_index.md"), project.locations.map((item) => `](locations/${item.id}.md)`).concat(project.systems.map((item) => `](systems/${item.id}.md)`)).concat(project.factions.map((item) => `](factions/${item.id}.md)`)).concat(project.artifacts.map((item) => `](artifacts/${item.id}.md)`))],
+    [path8.join("plot", "_index.md"), project.arcs.map((item) => `](arcs/${item.id}.md)`)],
+    [path8.join("chapters", "_index.md"), project.chapters.map((item) => `](${path8.basename(item.file)})`)],
+    [path8.join("scenes", "_index.md"), project.scenes.map((item) => `](${item.id}.md)`)],
+    [path8.join("continuity", "questions", "_index.md"), project.questions.map((item) => `](${item.id}.md)`)],
+    [path8.join("continuity", "promises", "_index.md"), project.promises.map((item) => `](${item.id}.md)`)],
+    [path8.join("glossary", "_index.md"), project.glossaryTerms.map((item) => `](terms/${item.id}.md)`)]
   ];
   for (const [indexPath, links] of indexChecks) {
-    const markdown = safeRead(path2.join(projectRoot, indexPath), projectRoot);
+    const markdown = safeRead(path8.join(projectRoot, indexPath), projectRoot);
     for (const link of links) {
       if (!markdown.includes(link)) {
         warnings.push(`${indexPath} is missing registry link ${link}`);
@@ -710,10 +2712,10 @@ function validateProject(root) {
   }
   for (const chapter of project.chapters) {
     if (chapter.declaredWordCount !== chapter.wordCount) {
-      warnings.push(`${path2.relative(projectRoot, chapter.file)} declares ${chapter.declaredWordCount} words but contains ${chapter.wordCount}`);
+      warnings.push(`${path8.relative(projectRoot, chapter.file)} declares ${chapter.declaredWordCount} words but contains ${chapter.wordCount}`);
     }
     if (!project.scenes.some((scene) => scene.chapter === chapter.id)) {
-      warnings.push(`${path2.relative(projectRoot, chapter.file)} has no machine-readable scene records`);
+      warnings.push(`${path8.relative(projectRoot, chapter.file)} has no machine-readable scene records`);
     }
   }
   return { ok: errors.length === 0, errors, warnings };
@@ -731,135 +2733,149 @@ function validateLinks(root) {
     for (const relationship of character.relationships) {
       const target = relationship.character;
       if (!characters.has(target)) {
-        errors.push(`${relative2(project, character.file)} references missing character ${target}`);
+        errors.push(`${relative6(project, character.file)} references missing character ${target}`);
       } else if (!characters.get(target).relationships.some((entry) => entry.character === character.id)) {
-        errors.push(`${relative2(project, character.file)} relationship to ${target} is missing backlink`);
+        errors.push(`${relative6(project, character.file)} relationship to ${target} is missing backlink`);
       } else {
         const backlink = characters.get(target).relationships.find((entry) => entry.character === character.id);
         const expectedType = inverseRelationshipType(relationship.type);
         if (expectedType && backlink.type !== expectedType) {
-          errors.push(`${relative2(project, character.file)} relationship ${relationship.type} to ${target} expects backlink type ${expectedType}, got ${backlink.type}`);
+          errors.push(`${relative6(project, character.file)} relationship ${relationship.type} to ${target} expects backlink type ${expectedType}, got ${backlink.type}`);
         }
       }
     }
     for (const locationId of character.locations) {
       if (!locations.has(locationId)) {
-        errors.push(`${relative2(project, character.file)} references missing location ${locationId}`);
+        errors.push(`${relative6(project, character.file)} references missing location ${locationId}`);
       } else if (!locations.get(locationId).notableCharacters.includes(character.id)) {
-        errors.push(`${relative2(project, character.file)} location ${locationId} is missing notable-character backlink`);
+        errors.push(`${relative6(project, character.file)} location ${locationId} is missing notable-character backlink`);
       }
     }
   }
   for (const location of project.locations) {
     for (const characterId of location.notableCharacters) {
       if (!characters.has(characterId)) {
-        errors.push(`${relative2(project, location.file)} references missing character ${characterId}`);
+        errors.push(`${relative6(project, location.file)} references missing character ${characterId}`);
       } else if (!characters.get(characterId).locations.includes(location.id)) {
-        errors.push(`${relative2(project, location.file)} notable character ${characterId} is missing location backlink`);
+        errors.push(`${relative6(project, location.file)} notable character ${characterId} is missing location backlink`);
       }
     }
   }
   for (const arc of project.arcs) {
     for (const characterId of arc.characters) {
       if (!characters.has(characterId)) {
-        errors.push(`${relative2(project, arc.file)} references missing character ${characterId}`);
+        errors.push(`${relative6(project, arc.file)} references missing character ${characterId}`);
       }
     }
   }
   for (const chapter of project.chapters) {
     if (chapter.pov && !characters.has(chapter.pov)) {
-      errors.push(`${relative2(project, chapter.file)} references missing POV character ${chapter.pov}`);
+      errors.push(`${relative6(project, chapter.file)} references missing POV character ${chapter.pov}`);
     }
     for (const characterId of chapter.characters.concat(chapter.mentions)) {
       if (!characters.has(characterId)) {
-        errors.push(`${relative2(project, chapter.file)} references missing character ${characterId}`);
+        errors.push(`${relative6(project, chapter.file)} references missing character ${characterId}`);
       }
     }
     for (const locationId of chapter.locations) {
       if (!locations.has(locationId)) {
-        errors.push(`${relative2(project, chapter.file)} references missing location ${locationId}`);
+        errors.push(`${relative6(project, chapter.file)} references missing location ${locationId}`);
       }
     }
     for (const arcId of chapter.arcsAdvanced) {
       if (!arcs.has(arcId)) {
-        errors.push(`${relative2(project, chapter.file)} references missing arc ${arcId}`);
+        errors.push(`${relative6(project, chapter.file)} references missing arc ${arcId}`);
       }
     }
   }
   for (const faction of project.factions) {
     for (const characterId of faction.members) {
       if (!characters.has(characterId)) {
-        errors.push(`${relative2(project, faction.file)} references missing member ${characterId}`);
+        errors.push(`${relative6(project, faction.file)} references missing member ${characterId}`);
       }
     }
     for (const locationId of faction.locations) {
       if (!locations.has(locationId)) {
-        errors.push(`${relative2(project, faction.file)} references missing location ${locationId}`);
+        errors.push(`${relative6(project, faction.file)} references missing location ${locationId}`);
       }
     }
   }
   for (const artifact of project.artifacts) {
     if (artifact.owner && !characters.has(artifact.owner) && !factions.has(artifact.owner)) {
-      errors.push(`${relative2(project, artifact.file)} references missing owner ${artifact.owner}`);
+      errors.push(`${relative6(project, artifact.file)} references missing owner ${artifact.owner}`);
     }
     if (artifact.location && !locations.has(artifact.location)) {
-      errors.push(`${relative2(project, artifact.file)} references missing location ${artifact.location}`);
+      errors.push(`${relative6(project, artifact.file)} references missing location ${artifact.location}`);
     }
   }
   for (const scene of project.scenes) {
     if (scene.chapter && !chapters.has(scene.chapter)) {
-      errors.push(`${relative2(project, scene.file)} references missing chapter ${scene.chapter}`);
+      errors.push(`${relative6(project, scene.file)} references missing chapter ${scene.chapter}`);
     }
     if (scene.pov && !characters.has(scene.pov)) {
-      errors.push(`${relative2(project, scene.file)} references missing POV character ${scene.pov}`);
+      errors.push(`${relative6(project, scene.file)} references missing POV character ${scene.pov}`);
     }
     if (scene.location && !locations.has(scene.location)) {
-      errors.push(`${relative2(project, scene.file)} references missing location ${scene.location}`);
+      errors.push(`${relative6(project, scene.file)} references missing location ${scene.location}`);
     }
     for (const characterId of scene.characters.concat(scene.mentions)) {
       if (!characters.has(characterId)) {
-        errors.push(`${relative2(project, scene.file)} references missing character ${characterId}`);
+        errors.push(`${relative6(project, scene.file)} references missing character ${characterId}`);
       }
     }
     for (const arcId of scene.arcsAdvanced) {
       if (!arcs.has(arcId)) {
-        errors.push(`${relative2(project, scene.file)} references missing arc ${arcId}`);
+        errors.push(`${relative6(project, scene.file)} references missing arc ${arcId}`);
       }
     }
   }
   for (const question of project.questions) {
     for (const chapterId of [question.introduced, question.resolved].filter(Boolean)) {
       if (!chapters.has(chapterId)) {
-        errors.push(`${relative2(project, question.file)} references missing chapter ${chapterId}`);
+        errors.push(`${relative6(project, question.file)} references missing chapter ${chapterId}`);
       }
     }
     for (const characterId of question.characters) {
       if (!characters.has(characterId)) {
-        errors.push(`${relative2(project, question.file)} references missing character ${characterId}`);
+        errors.push(`${relative6(project, question.file)} references missing character ${characterId}`);
       }
     }
   }
   for (const promise of project.promises) {
     for (const chapterId of [promise.planted, promise.payoff].filter(Boolean)) {
       if (!chapters.has(chapterId)) {
-        errors.push(`${relative2(project, promise.file)} references missing chapter ${chapterId}`);
+        errors.push(`${relative6(project, promise.file)} references missing chapter ${chapterId}`);
       }
     }
     for (const arcId of promise.arcs) {
       if (!arcs.has(arcId)) {
-        errors.push(`${relative2(project, promise.file)} references missing arc ${arcId}`);
+        errors.push(`${relative6(project, promise.file)} references missing arc ${arcId}`);
       }
     }
     for (const characterId of promise.characters) {
       if (!characters.has(characterId)) {
-        errors.push(`${relative2(project, promise.file)} references missing character ${characterId}`);
+        errors.push(`${relative6(project, promise.file)} references missing character ${characterId}`);
       }
     }
   }
   return { ok: errors.length === 0, errors, warnings };
 }
 function checkProjectContinuity(root) {
-  return checkContinuity(scanProject(root));
+  const project = scanProject(root);
+  return mergeChecks([
+    checkContinuity(project),
+    checkEpistemicGraph(project),
+    checkRelationships(project),
+    checkStateSnapshots(project),
+    checkTransactions(project),
+    checkArcs(project),
+    checkCausalChains(project)
+  ]);
+}
+function mergeChecks(results) {
+  const errors = results.flatMap((result) => result.errors);
+  const warnings = results.flatMap((result) => result.warnings);
+  return { ok: errors.length === 0, errors, warnings };
 }
 function projectReport(root) {
   const project = scanProject(root);
@@ -1009,14 +3025,14 @@ function formatDoctorReport(report) {
 function reindexProject(root) {
   const project = scanProject(root);
   const changed = [];
-  const charactersIndexPath = path2.join(project.root, "characters", "_index.md");
-  const worldIndexPath = path2.join(project.root, "worldbuilding", "_index.md");
-  const plotIndexPath = path2.join(project.root, "plot", "_index.md");
-  const chaptersIndexPath = path2.join(project.root, "chapters", "_index.md");
-  const scenesIndexPath = path2.join(project.root, "scenes", "_index.md");
-  const questionsIndexPath = path2.join(project.root, "continuity", "questions", "_index.md");
-  const promisesIndexPath = path2.join(project.root, "continuity", "promises", "_index.md");
-  const glossaryIndexPath = path2.join(project.root, "glossary", "_index.md");
+  const charactersIndexPath = path8.join(project.root, "characters", "_index.md");
+  const worldIndexPath = path8.join(project.root, "worldbuilding", "_index.md");
+  const plotIndexPath = path8.join(project.root, "plot", "_index.md");
+  const chaptersIndexPath = path8.join(project.root, "chapters", "_index.md");
+  const scenesIndexPath = path8.join(project.root, "scenes", "_index.md");
+  const questionsIndexPath = path8.join(project.root, "continuity", "questions", "_index.md");
+  const promisesIndexPath = path8.join(project.root, "continuity", "promises", "_index.md");
+  const glossaryIndexPath = path8.join(project.root, "glossary", "_index.md");
   const existingCharacters = safeRead(charactersIndexPath, project.root);
   const existingWorld = safeRead(worldIndexPath, project.root);
   const existingPlot = safeRead(plotIndexPath, project.root);
@@ -1029,7 +3045,42 @@ function reindexProject(root) {
   writeChanged(questionsIndexPath, questionIndex(project.storyId, project.questions), changed, project.root);
   writeChanged(promisesIndexPath, promiseIndex(project.storyId, project.promises), changed, project.root);
   writeChanged(glossaryIndexPath, glossaryIndex(project.storyId, project.glossaryTerms), changed, project.root);
+  reindexV3(project, changed);
   return { changed };
+}
+function reindexV3(project, changed) {
+  const factsDir = path8.join(project.root, "continuity", "facts");
+  const knowledgeDir = path8.join(project.root, "continuity", "knowledge");
+  const relationshipsDir = path8.join(project.root, "continuity", "relationships");
+  const stateDir = path8.join(project.root, "continuity", "state");
+  if (fs2.existsSync(factsDir)) {
+    writeChanged(path8.join(factsDir, "_index.md"), factIndex(project.storyId, project.facts), changed, project.root);
+  }
+  if (fs2.existsSync(knowledgeDir)) {
+    writeChanged(path8.join(knowledgeDir, "_index.md"), knowledgeIndex(project.storyId, project.knowledge), changed, project.root);
+  }
+  if (fs2.existsSync(relationshipsDir)) {
+    writeChanged(path8.join(relationshipsDir, "_index.md"), relationshipIndex(project.storyId, project.relationships), changed, project.root);
+  }
+  if (fs2.existsSync(stateDir)) {
+    writeChanged(path8.join(stateDir, "_index.md"), stateIndex(project.storyId, project.stateSnapshots), changed, project.root);
+    writeChanged(path8.join(stateDir, "current.md"), currentState(project.storyId, resolveCurrentSnapshot(project)), changed, project.root);
+    syncLegacyStatePointer(project, changed);
+  }
+}
+function syncLegacyStatePointer(project, changed) {
+  const latest = resolveCurrentSnapshot(project);
+  if (!project.continuity || !latest) {
+    return;
+  }
+  if (project.continuity.data["current-chapter"] === latest.sequence) {
+    return;
+  }
+  const statePath = path8.join(project.root, "continuity", "state.md");
+  writeChanged(statePath, replaceFrontmatter(project.continuity.rawMarkdown, {
+    ...project.continuity.data,
+    "current-chapter": latest.sequence
+  }), changed, project.root);
 }
 function computeWordCounts(root, options = {}) {
   const project = scanProject(root);
@@ -1038,7 +3089,7 @@ function computeWordCounts(root, options = {}) {
     chapters.push({
       number: chapter.number,
       title: chapter.title,
-      file: path2.relative(project.root, chapter.file),
+      file: path8.relative(project.root, chapter.file),
       wordCount: chapter.wordCount
     });
     if (options.write) {
@@ -1078,7 +3129,7 @@ function buildBook(root, options = {}) {
   const format = normalizeBuildFormat(options.format ?? "markdown");
   const project = scanProject(root);
   const extension = format === "markdown" ? "md" : format;
-  const output = resolveOutputPath(project, options.out, path2.join("dist", `${project.storyId}.${extension}`));
+  const output = resolveOutputPath(project, options.out, path8.join("dist", `${project.storyId}.${extension}`));
   if (format === "markdown") {
     const result = exportManuscript(project.root, {
       out: output.outFile,
@@ -1096,26 +3147,26 @@ function buildBook(root, options = {}) {
   return { outFile: output.outFile, chapters: manuscript.chapters.length, format };
 }
 function migrateProject(root) {
-  const projectRoot = path2.resolve(root);
-  const storyPath = path2.join(projectRoot, "story.md");
+  const projectRoot = path8.resolve(root);
+  const storyPath = path8.join(projectRoot, "story.md");
   const story = readMarkdown(storyPath, projectRoot);
-  const storyId = kebabCase(story.data.title ?? path2.basename(projectRoot));
+  const storyId = kebabCase(story.data.title ?? path8.basename(projectRoot));
   const changed = [];
   for (const directory of [
-    path2.join("worldbuilding", "factions"),
-    path2.join("worldbuilding", "artifacts"),
+    path8.join("worldbuilding", "factions"),
+    path8.join("worldbuilding", "artifacts"),
     "scenes",
-    path2.join("continuity", "questions"),
-    path2.join("continuity", "promises"),
-    path2.join("glossary", "terms")
+    path8.join("continuity", "questions"),
+    path8.join("continuity", "promises"),
+    path8.join("glossary", "terms")
   ]) {
-    ensureDirectory(path2.join(projectRoot, directory), changed, projectRoot);
+    ensureDirectory(path8.join(projectRoot, directory), changed, projectRoot);
   }
-  ensureFile(path2.join(projectRoot, "scenes", "_index.md"), sceneIndex(storyId, []), changed, projectRoot);
-  ensureFile(path2.join(projectRoot, "continuity", "state.md"), continuityState(storyId), changed, projectRoot);
-  ensureFile(path2.join(projectRoot, "continuity", "questions", "_index.md"), questionIndex(storyId, []), changed, projectRoot);
-  ensureFile(path2.join(projectRoot, "continuity", "promises", "_index.md"), promiseIndex(storyId, []), changed, projectRoot);
-  ensureFile(path2.join(projectRoot, "glossary", "_index.md"), glossaryIndex(storyId, []), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "scenes", "_index.md"), sceneIndex(storyId, []), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "continuity", "state.md"), continuityState(storyId), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "continuity", "questions", "_index.md"), questionIndex(storyId, []), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "continuity", "promises", "_index.md"), promiseIndex(storyId, []), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "glossary", "_index.md"), glossaryIndex(storyId, []), changed, projectRoot);
   if (story.data["schema-version"] !== STORY_SCHEMA_VERSION) {
     writeFile(storyPath, replaceFrontmatter(story.rawMarkdown, {
       ...story.data,
@@ -1123,8 +3174,482 @@ function migrateProject(root) {
     }), { root: projectRoot });
     changed.push(storyPath);
   }
+  migrateToV3(projectRoot, storyId, changed);
   const reindexed = reindexProject(projectRoot);
   return { root: projectRoot, changed: changed.concat(reindexed.changed) };
+}
+function migrateToV3(projectRoot, storyId, changed) {
+  for (const directory of V3_DIRECTORIES) {
+    ensureDirectory(path8.join(projectRoot, directory), changed, projectRoot);
+  }
+  ensureFile(path8.join(projectRoot, "continuity", "facts", "_index.md"), factIndex(storyId, []), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "continuity", "knowledge", "_index.md"), knowledgeIndex(storyId, []), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "continuity", "relationships", "_index.md"), relationshipIndex(storyId, []), changed, projectRoot);
+  const preStorySnapshot = { id: "chapter-00", sequence: 0, chapter: "" };
+  ensureFile(path8.join(projectRoot, "continuity", "state", "_index.md"), stateIndex(storyId, [preStorySnapshot]), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "continuity", "state", "chapter-00.md"), stateSnapshot(storyId, {
+    chapter: "",
+    sequence: 0,
+    note: "Durable state before chapter one opens. Seeded by migration; review and fill in."
+  }), changed, projectRoot);
+  ensureFile(path8.join(projectRoot, "continuity", "state", "current.md"), currentState(storyId, {
+    id: "chapter-00",
+    chapter: "",
+    sequence: 0
+  }), changed, projectRoot);
+  migrateKnowledgeState(projectRoot, changed);
+  migrateChapterSnapshots(projectRoot, storyId, changed);
+}
+function migrateChapterSnapshots(projectRoot, storyId, changed) {
+  const chapters = readChapterNumbers(projectRoot);
+  if (chapters.length === 0) {
+    return;
+  }
+  const contiguous = chapters.every((chapter, index) => chapter.number === index + 1);
+  if (!contiguous) {
+    return;
+  }
+  const legacy = legacyDurableState(projectRoot);
+  const latest = chapters[chapters.length - 1];
+  for (const chapter of chapters) {
+    const isLatest = chapter.id === latest.id;
+    ensureFile(path8.join(projectRoot, "continuity", "state", `${chapter.id}.md`), stateSnapshot(storyId, {
+      chapter: chapter.id,
+      sequence: chapter.number,
+      provisional: true,
+      characters: isLatest ? legacy.characters : [],
+      objects: isLatest ? legacy.objects : [],
+      note: isLatest ? "Provisional. Reconstructed at migration from continuity/state.md. Review before relying on it." : "Provisional. v2 did not record per-chapter state, so this snapshot is intentionally empty."
+    }), changed, projectRoot);
+  }
+  writeChanged(path8.join(projectRoot, "continuity", "state", "current.md"), currentState(storyId, {
+    id: latest.id,
+    chapter: latest.id,
+    sequence: latest.number
+  }), changed, projectRoot);
+}
+function readChapterNumbers(projectRoot) {
+  const directory = path8.join(projectRoot, "chapters");
+  if (!fs2.existsSync(directory)) {
+    return [];
+  }
+  return fs2.readdirSync(directory).filter((name) => name.endsWith(".md") && name !== "_index.md").map((name) => {
+    const id = path8.basename(name, ".md");
+    const data = readMarkdown(path8.join(directory, name), projectRoot).data;
+    return { id, number: Number(data.number ?? chapterNumberFromFile(name) ?? 0) };
+  }).filter((chapter) => Number.isInteger(chapter.number) && chapter.number > 0).sort((left, right) => left.number - right.number);
+}
+function legacyDurableState(projectRoot) {
+  const legacyPath = path8.join(projectRoot, "continuity", "state.md");
+  if (!fs2.existsSync(legacyPath)) {
+    return { characters: [], objects: [] };
+  }
+  const data = readMarkdown(legacyPath, projectRoot).data;
+  const mappings = (value) => asArray(value).filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry));
+  return {
+    characters: mappings(data["character-state"]).map(({ character, ...rest }) => ({ id: character, ...rest })),
+    objects: mappings(data["object-state"]).map(({ artifact, ...rest }) => ({ id: artifact, ...rest }))
+  };
+}
+function migrateKnowledgeState(projectRoot, changed) {
+  const legacyPath = path8.join(projectRoot, "continuity", "state.md");
+  if (!fs2.existsSync(legacyPath)) {
+    return;
+  }
+  const entries = asArray(readMarkdown(legacyPath, projectRoot).data["knowledge-state"]).filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry)).filter((entry) => entry.character && entry.knows);
+  const chapters = new Set(fs2.existsSync(path8.join(projectRoot, "chapters")) ? fs2.readdirSync(path8.join(projectRoot, "chapters")).filter((name) => name.endsWith(".md") && name !== "_index.md").map((name) => path8.basename(name, ".md")) : []);
+  const resolves = (value) => {
+    const text = String(value ?? "").trim();
+    return text !== "" && (text === PRE_STORY2 || chapters.has(text));
+  };
+  const byCharacter = new Map;
+  for (const entry of entries) {
+    const factId = kebabCase(entry.knows);
+    if (!factId) {
+      continue;
+    }
+    const learnedIn = entry["learned-in"];
+    const carried = resolves(learnedIn);
+    const unresolved = Boolean(learnedIn) && !carried;
+    ensureFile(path8.join(projectRoot, "continuity", "facts", `${factId}.md`), factFile(factId, {
+      statement: String(entry.knows),
+      truthStatus: "undetermined",
+      establishedIn: carried ? learnedIn : "",
+      tags: ["migrated", "needs-review"]
+    }), changed, projectRoot);
+    const record = byCharacter.get(entry.character) ?? [];
+    if (!record.some((item) => item.fact === factId)) {
+      record.push({
+        fact: factId,
+        status: "knows",
+        ...carried ? { "learned-in": learnedIn } : {},
+        ...unresolved ? { notes: `migration could not resolve learned-in ${learnedIn}; set it by hand` } : {}
+      });
+    }
+    byCharacter.set(entry.character, record);
+  }
+  for (const [character, facts] of byCharacter) {
+    ensureFile(path8.join(projectRoot, "continuity", "knowledge", `${character}.md`), knowledgeFile(character, facts), changed, projectRoot);
+  }
+}
+function recordKnowledge(root, options) {
+  const project = scanProject(root);
+  const character = String(options.character ?? "").trim();
+  const fact = String(options.fact ?? "").trim();
+  const status = String(options.status ?? "").trim();
+  if (!character) {
+    throw new Error("--character is required");
+  }
+  if (!fact) {
+    throw new Error("--fact is required");
+  }
+  if (!EPISTEMIC_STATUSES.has(status)) {
+    throw new Error(`--status must be one of ${[...EPISTEMIC_STATUSES].join(", ")}`);
+  }
+  if (!project.characters.some((item) => item.id === character)) {
+    throw new Error(`Unknown character: ${character}`);
+  }
+  if (!project.facts.some((item) => item.id === fact)) {
+    throw new Error(`Unknown fact: ${fact}`);
+  }
+  const learnedIn = String(options["learned-in"] ?? "").trim();
+  if (learnedIn && learnedIn !== PRE_STORY2 && !project.chapters.some((item) => item.id === learnedIn)) {
+    throw new Error(`Unknown chapter: ${learnedIn}`);
+  }
+  if (status === "unknown" && learnedIn) {
+    throw new Error("status unknown cannot record a learned-in chapter");
+  }
+  const confidence = String(options.confidence ?? "").trim();
+  if (confidence && !CONFIDENCE_LEVELS.has(confidence)) {
+    throw new Error(`--confidence must be one of ${[...CONFIDENCE_LEVELS].join(", ")}`);
+  }
+  const entry = { fact, status };
+  if (learnedIn) {
+    entry["learned-in"] = learnedIn;
+  }
+  if (options.source) {
+    entry.source = String(options.source);
+  }
+  if (confidence) {
+    entry.confidence = confidence;
+  }
+  if (options.notes) {
+    entry.notes = String(options.notes);
+  }
+  const file = path8.join(project.root, "continuity", "knowledge", `${character}.md`);
+  const existing = fs2.existsSync(file) ? readMarkdown(file, project.root) : null;
+  const entries = existing ? asArray(existing.data.facts).filter((item) => item && item.fact !== fact) : [];
+  const facts = entries.concat([entry]).sort((left, right) => String(left.fact).localeCompare(String(right.fact)));
+  const markdown = existing ? replaceFrontmatter(existing.rawMarkdown, { ...existing.data, facts }) : knowledgeFile(character, facts);
+  writeFile(file, markdown, { root: project.root });
+  const reindexed = reindexProject(project.root);
+  return { character, fact, status, file, changed: [file].concat(reindexed.changed) };
+}
+function stateReport(root, options = {}) {
+  const project = scanProject(root);
+  const requested = String(options.chapter ?? "").trim();
+  const snapshot = requested ? project.stateSnapshots.find((item) => item.chapter === requested || item.id === requested) : resolveCurrentSnapshot(project);
+  if (requested && !snapshot) {
+    throw new Error(`No state snapshot for ${requested}`);
+  }
+  const character = String(options.character ?? "").trim();
+  if (character && !project.characters.some((item) => item.id === character)) {
+    throw new Error(`Unknown character: ${character}`);
+  }
+  return {
+    root: project.root,
+    snapshot,
+    character,
+    trajectory: character ? characterTrajectory(project, character) : [],
+    history: project.stateSnapshots.map((item) => ({
+      id: item.id,
+      sequence: item.sequence,
+      chapter: item.chapter,
+      provisional: item.provisional
+    }))
+  };
+}
+function characterTrajectory(project, character) {
+  const steps = [];
+  let previous = null;
+  for (const snapshot of project.stateSnapshots) {
+    const entry = snapshot.characters.find((item) => item && item.id === character);
+    if (!entry) {
+      continue;
+    }
+    const { id, ...fields } = entry;
+    const changed = Object.entries(fields).filter(([key, value]) => value !== "" && (!previous || previous[key] !== value)).map(([key, value]) => ({ field: key, value }));
+    if (changed.length > 0) {
+      steps.push({ chapter: snapshot.chapter || "pre-story", sequence: snapshot.sequence, changed });
+    }
+    previous = fields;
+  }
+  return steps;
+}
+function knowledgeReport(root, options = {}) {
+  const project = scanProject(root);
+  const requested = String(options.character ?? "").trim();
+  const statements = new Map(project.facts.map((fact) => [fact.id, fact.statement]));
+  const records = project.knowledge.filter((record) => !requested || record.character === requested).map((record) => ({
+    character: record.character,
+    facts: record.facts.map((entry) => ({
+      fact: entry.fact,
+      status: entry.status,
+      learnedIn: entry["learned-in"] ?? "",
+      confidence: entry.confidence ?? "",
+      statement: statements.get(entry.fact) ?? ""
+    }))
+  }));
+  if (requested && records.length === 0) {
+    throw new Error(`No knowledge record for ${requested}`);
+  }
+  return { root: project.root, records };
+}
+function formatStateReport(report) {
+  const lines = [];
+  if (!report.snapshot) {
+    lines.push("No state snapshots yet.");
+    return `${lines.join(`
+`)}
+`;
+  }
+  const snapshot = report.snapshot;
+  lines.push(`State ${snapshot.id} (sequence ${snapshot.sequence}, chapter ${snapshot.chapter || "pre-story"})`);
+  if (snapshot.provisional) {
+    lines.push("Provisional: reconstructed at migration, not captured at acceptance");
+  }
+  const time = Object.entries(snapshot.storyTime).filter(([, value]) => value !== "");
+  if (time.length > 0) {
+    lines.push(`Story time: ${time.map(([key, value]) => `${key} ${value}`).join(", ")}`);
+  }
+  appendStateSection(lines, "Characters", snapshot.characters);
+  appendStateSection(lines, "Objects", snapshot.objects);
+  appendStateSection(lines, "Relationships", snapshot.relationships);
+  if (snapshot.activeThreads.length > 0) {
+    lines.push(`Active threads: ${snapshot.activeThreads.join(", ")}`);
+  }
+  if (report.character) {
+    lines.push(`Trajectory of ${report.character}:`);
+    for (const step of report.trajectory) {
+      lines.push(`  ${step.chapter}: ${step.changed.map((item) => `${item.field}=${item.value}`).join(", ")}`);
+    }
+  }
+  const provisional = report.history.filter((item) => item.provisional).length;
+  lines.push(`History: ${report.history.length} snapshot(s)${provisional > 0 ? `, ${provisional} provisional` : ""}`);
+  return `${lines.join(`
+`)}
+`;
+}
+function appendStateSection(lines, title, entries) {
+  if (entries.length === 0) {
+    return;
+  }
+  lines.push(`${title}:`);
+  for (const entry of entries) {
+    const detail = Object.entries(entry).filter(([key, value]) => key !== "id" && value !== "").map(([key, value]) => `${key}=${value}`).join(" ");
+    lines.push(`  ${entry.id}${detail ? ` ${detail}` : ""}`);
+  }
+}
+function formatKnowledgeReport(report) {
+  if (report.records.length === 0) {
+    return `No knowledge records yet.
+`;
+  }
+  const lines = [];
+  for (const record of report.records) {
+    lines.push(`${record.character}:`);
+    if (record.facts.length === 0) {
+      lines.push("  (no tracked facts)");
+      continue;
+    }
+    for (const entry of record.facts) {
+      const suffix = [entry.learnedIn && `learned-in ${entry.learnedIn}`, entry.confidence && `confidence ${entry.confidence}`].filter(Boolean).join(", ");
+      lines.push(`  ${entry.status.padEnd(11)} ${entry.fact}${suffix ? ` (${suffix})` : ""}`);
+    }
+  }
+  return `${lines.join(`
+`)}
+`;
+}
+function commitWrites(root, writes) {
+  const originals = writes.map((write) => ({
+    file: write.file,
+    existed: fs2.existsSync(write.file),
+    contents: fs2.existsSync(write.file) ? fs2.readFileSync(write.file) : null
+  }));
+  const written = [];
+  try {
+    for (const write of writes) {
+      writeFile(write.file, write.contents, { root });
+      written.push(write.file);
+    }
+  } catch (error) {
+    for (const original of originals) {
+      if (!written.includes(original.file)) {
+        continue;
+      }
+      if (original.existed) {
+        fs2.writeFileSync(original.file, original.contents);
+      } else {
+        fs2.rmSync(original.file, { force: true });
+      }
+    }
+    throw error;
+  }
+  return written;
+}
+function listCandidates(root, options = {}) {
+  const project = scanProject(root);
+  const chapter = String(options.chapter ?? "").trim();
+  return {
+    root: project.root,
+    candidates: project.candidates.filter((candidate) => !chapter || candidate.chapter === chapter).map((candidate) => ({
+      id: candidate.id,
+      chapter: candidate.chapter,
+      status: candidate.status,
+      number: candidate.number,
+      pov: candidate.pov,
+      words: wordCount(candidate.body),
+      canonical: project.chapters.some((item) => item.id === candidate.chapter)
+    }))
+  };
+}
+function acceptCandidate(root, options = {}) {
+  const project = scanProject(root);
+  const plan = planAcceptance(project, { ...options, now: options.now });
+  const written = commitWrites(project.root, plan.writes);
+  const reindexed = reindexProject(project.root);
+  return {
+    chapter: plan.candidate.chapter,
+    candidate: plan.candidate.id,
+    bodyHash: plan.bodyHash,
+    stateBefore: plan.transaction["state-before"],
+    stateAfter: plan.transaction["state-after"],
+    changed: written.concat(reindexed.changed)
+  };
+}
+function rejectCandidate(root, options = {}) {
+  const project = scanProject(root);
+  const plan = planRejection(project, options);
+  const written = commitWrites(project.root, plan.writes);
+  return {
+    chapter: plan.candidate.chapter,
+    candidate: plan.candidate.id,
+    changed: written
+  };
+}
+function readTransactionRecord(root, options = {}) {
+  const project = scanProject(root);
+  const chapter = String(options.chapter ?? "").trim();
+  const transaction = project.transactions.find((item) => item.id === chapter);
+  if (!transaction) {
+    throw new Error(`No transaction for ${chapter || "(unset)"}`);
+  }
+  return transaction.data;
+}
+function sealArc(root, options = {}) {
+  const project = scanProject(root);
+  const arcId = String(options.arc ?? "").trim();
+  const arc = project.arcs.find((item) => item.id === arcId);
+  if (!arc) {
+    throw new Error(`Unknown arc: ${arcId || "(unset)"}`);
+  }
+  const version = project.sealedArcs.filter((plan) => plan.arc === arc.id).reduce((max, plan) => Math.max(max, plan.version), 0) + 1;
+  const id = `${arc.id}-v${version}`;
+  const file = path8.join(project.root, "plot", "arcs", "sealed", `${id}.md`);
+  if (fs2.existsSync(file)) {
+    throw new Error(`${relative6(project, file)} already exists`);
+  }
+  const sourceHash = createHash2("sha256").update(JSON.stringify(arc.rawData), "utf8").digest("hex");
+  const writes = [
+    { file, contents: sealedArcPlan(arc, version, { sourceHash, now: options.now }) },
+    {
+      file: arc.file,
+      contents: replaceFrontmatter(arc.rawMarkdown, {
+        ...arc.rawData,
+        "plan-version": version,
+        "sealed-version": id
+      })
+    }
+  ];
+  const written = commitWrites(project.root, writes);
+  const reindexed = reindexProject(project.root);
+  return { arc: arc.id, version, id, file, changed: written.concat(reindexed.changed) };
+}
+function contextProjection(root, options = {}) {
+  return projectContext(scanProject(root), options);
+}
+function formatContextProjection(projection) {
+  const newline = String.fromCharCode(10);
+  const lines = [
+    `Context ${projection.chapter} / POV ${projection.pov}`,
+    `Narrative: ${projection.narrative.pov}, ${projection.narrative.tense} tense`
+  ];
+  if (projection.location.id) {
+    lines.push(`Location: ${projection.location.name ?? projection.location.id}`);
+  }
+  for (const status of ["knows", "believes", "suspects", "doubts", "misbelieves"]) {
+    const entries = projection.knowledge[status] ?? [];
+    if (entries.length === 0) {
+      continue;
+    }
+    lines.push(`${status}:`);
+    for (const entry of entries) {
+      lines.push(`  ${entry.statement || entry.fact}${entry["learned-in"] ? ` (${entry["learned-in"]})` : ""}`);
+    }
+  }
+  if (projection.present.length > 0) {
+    lines.push(`Present: ${projection.present.map((item) => item.name).join(", ")}`);
+  }
+  if (projection.objects.length > 0) {
+    lines.push(`Objects: ${projection.objects.map((item) => item.name).join(", ")}`);
+  }
+  lines.push(`Withheld: ${projection.excluded.facts} fact(s) ${projection.excluded.reason}`);
+  return `${lines.join(newline)}${newline}`;
+}
+function proseDiagnostics(root, options = {}) {
+  const project = scanProject(root);
+  const requested = String(options.chapter ?? "").trim();
+  const chapters = project.chapters.filter((chapter) => !requested || chapter.id === requested).map((chapter) => ({ id: chapter.id, text: chapterProse(parseFrontmatter(chapter.rawMarkdown, chapter.file).body) }));
+  if (requested && chapters.length === 0) {
+    throw new Error(`Unknown chapter: ${requested}`);
+  }
+  return analyzeProse(chapters, options);
+}
+function arcSimulation(root, options = {}) {
+  const project = scanProject(root);
+  const brief = buildArcSimulation(project, options);
+  if (!options.write) {
+    return { brief, file: "" };
+  }
+  const file = path8.join(project.root, "plot", "arcs", "simulations", `${brief.arc}-v${brief["plan-version"] || 1}.json`);
+  writeFile(file, `${JSON.stringify(brief, null, 2)}${String.fromCharCode(10)}`, { root: project.root });
+  return { brief, file };
+}
+function renderPacket(root, options = {}) {
+  const project = scanProject(root);
+  const packet = buildRenderPacket(project, options);
+  if (!options.write) {
+    return { packet, file: "" };
+  }
+  const version = Number(options.version ?? 1);
+  const file = path8.join(project.root, "work", "chapters", packet.chapter, `render-packet-v${version}.json`);
+  writeFile(file, `${JSON.stringify(packet, null, 2)}${String.fromCharCode(10)}`, { root: project.root });
+  return { packet, file };
+}
+function createCandidate(root, options = {}) {
+  const project = scanProject(root);
+  const chapter = String(options.chapter ?? "").trim();
+  requireKebabId(chapter, "chapter id");
+  const number = Number(options.number ?? Number(String(chapter).replace(/[^0-9]/g, "")) ?? 0);
+  const existing = project.candidates.filter((candidate) => candidate.chapter === chapter);
+  const id = `candidate-${String(existing.length + 1).padStart(3, "0")}`;
+  const file = path8.join(project.root, "work", "chapters", chapter, `${id}.md`);
+  if (fs2.existsSync(file)) {
+    throw new Error(`${relative6(project, file)} already exists`);
+  }
+  writeFile(file, candidateFile(chapter, id, number, options), { root: project.root });
+  return { chapter, candidate: id, file };
 }
 function createEntity(root, options) {
   const project = scanProject(root);
@@ -1134,8 +3659,8 @@ function createEntity(root, options) {
     throw new Error(`A ${kind} name is required`);
   }
   const entity = buildEntity(project, kind, name, options);
-  if (fs.existsSync(entity.file)) {
-    throw new Error(`${relative2(project, entity.file)} already exists`);
+  if (fs2.existsSync(entity.file)) {
+    throw new Error(`${relative6(project, entity.file)} already exists`);
   }
   writeFile(entity.file, entity.markdown, { root: project.root });
   applyEntityBacklinks(project.root, kind, entity.id, readMarkdown(entity.file, project.root).data);
@@ -1151,23 +3676,23 @@ function renameEntity(root, options) {
     throw new Error("rename requires an entity id and a new name");
   }
   const config = entityConfig(kind);
-  const oldFile = path2.join(project.root, config.dir, `${oldId}.md`);
+  const oldFile = path8.join(project.root, config.dir, `${oldId}.md`);
   requireKebabId(oldId, `${kind} id`);
   assertSafeProjectPath(oldFile, project.root);
-  if (!fs.existsSync(oldFile)) {
+  if (!fs2.existsSync(oldFile)) {
     throw new Error(`${kind} ${oldId} does not exist`);
   }
   const markdown = readMarkdown(oldFile, project.root);
   const newId = kind === "chapter" ? oldId : kebabCase(name);
-  const newFile = path2.join(project.root, config.dir, `${newId}.md`);
+  const newFile = path8.join(project.root, config.dir, `${newId}.md`);
   assertSafeProjectPath(newFile, project.root);
-  if (newFile !== oldFile && fs.existsSync(newFile)) {
+  if (newFile !== oldFile && fs2.existsSync(newFile)) {
     throw new Error(`${kind} ${newId} already exists`);
   }
   const data = { ...markdown.data, [config.titleField]: name };
   writeFile(oldFile, replaceFrontmatter(markdown.rawMarkdown, data), { root: project.root });
   if (newFile !== oldFile) {
-    fs.renameSync(oldFile, newFile);
+    fs2.renameSync(oldFile, newFile);
     replaceEntityReferences(project.root, oldId, newId);
   }
   const reindexed = reindexProject(project.root);
@@ -1181,13 +3706,13 @@ function removeEntity(root, options) {
     throw new Error("remove requires an entity id");
   }
   const config = entityConfig(kind);
-  const file = path2.join(project.root, config.dir, `${id}.md`);
+  const file = path8.join(project.root, config.dir, `${id}.md`);
   requireKebabId(id, `${kind} id`);
   assertSafeProjectPath(file, project.root);
-  if (!fs.existsSync(file)) {
+  if (!fs2.existsSync(file)) {
     throw new Error(`${kind} ${id} does not exist`);
   }
-  fs.rmSync(file);
+  fs2.rmSync(file);
   removeEntityReferences(project.root, id);
   const reindexed = reindexProject(project.root);
   return { kind, id, file, changed: [file].concat(reindexed.changed) };
@@ -1300,7 +3825,7 @@ ${themeTracking || `| Theme | Arcs | Chapters |
 `;
 }
 function chapterIndex(storyId, chapters) {
-  const rows = chapters.length === 0 ? ["| *No chapters yet* | | | | | |"] : chapters.map((chapter) => `| ${chapter.number} | ${chapter.title} | ${chapter.pov} | ${chapter.status} | ${chapter.wordCount} | [${chapter.id}](${path2.basename(chapter.file)}) |`);
+  const rows = chapters.length === 0 ? ["| *No chapters yet* | | | | | |"] : chapters.map((chapter) => `| ${chapter.number} | ${chapter.title} | ${chapter.pov} | ${chapter.status} | ${chapter.wordCount} | [${chapter.id}](${path8.basename(chapter.file)}) |`);
   const total = chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0);
   return `${stringifyFrontmatter({ type: "chapter-registry", story: storyId })}# Chapters
 
@@ -1520,27 +4045,90 @@ function buildEntity(project, kind, name, options) {
       return entityResult(project, kind, id, promiseFile(name, options));
     case "term":
       return entityResult(project, kind, id, termFile(name, options));
+    case "fact":
+      return entityResult(project, kind, id, factFile(id, {
+        statement: name,
+        truthStatus: options["truth-status"],
+        establishedIn: options["established-in"],
+        resolvedIn: options["resolved-in"],
+        tags: normalizeList(options.tag, [])
+      }));
+    case "knowledge":
+      return entityResult(project, kind, id, knowledgeFile(id, []));
+    case "relationship":
+      return buildRelationship(project, kind, options);
     default:
       entityConfig(kind);
   }
 }
+function buildRelationship(project, kind, options) {
+  const participants = normalizeList(options.character, []).map((value) => String(value).trim()).filter(Boolean);
+  if (participants.length < 2) {
+    throw new Error("A relationship needs at least two --character values");
+  }
+  for (const participant of participants) {
+    requireKebabId(participant, "relationship participant");
+  }
+  const sorted = [...participants].sort();
+  return entityResult(project, kind, sorted.join("-"), relationshipFile(sorted.join("-"), sorted, {
+    publicStatus: options["public-status"],
+    privateStatus: options["private-status"],
+    lastMajorChange: options["last-major-change"]
+  }));
+}
+function candidateFile(chapter, id, number, options) {
+  return `${stringifyFrontmatter({
+    type: "chapter-candidate",
+    chapter,
+    candidate: id,
+    title: options.title ?? titleCaseSlug(chapter),
+    number,
+    status: "pending",
+    pov: options.pov ?? "",
+    "plan-version": options["plan-version"] ?? "",
+    "render-packet-version": options["render-packet-version"] ?? "",
+    review: "",
+    characters: normalizeList(options.character, []),
+    mentions: normalizeList(options.mention, []),
+    locations: normalizeList(options.location, []),
+    "arcs-advanced": normalizeList(options.arc, []),
+    "story-time": { date: "", time: "", elapsed: "" },
+    "state-characters": [],
+    "state-objects": [],
+    "state-relationships": [],
+    "knowledge-delta": [],
+    "promise-delta": [],
+    "question-delta": [],
+    "active-threads": [],
+    "reader-knowledge": []
+  })}# ${options.title ?? titleCaseSlug(chapter)}
+
+## Chapter Text
+
+Draft prose goes here. This file is a candidate, not canon: nothing in it
+affects story state until \`story accept\` commits it.
+`;
+}
 function entityResult(project, kind, id, markdown) {
   const config = entityConfig(kind);
-  return { id, markdown, file: path2.join(project.root, config.dir, `${id}.md`) };
+  return { id, markdown, file: path8.join(project.root, config.dir, `${id}.md`) };
 }
 function entityConfig(kind) {
   const configs = {
     character: { dir: "characters", titleField: "name" },
-    location: { dir: path2.join("worldbuilding", "locations"), titleField: "name" },
-    system: { dir: path2.join("worldbuilding", "systems"), titleField: "name" },
-    faction: { dir: path2.join("worldbuilding", "factions"), titleField: "name" },
-    artifact: { dir: path2.join("worldbuilding", "artifacts"), titleField: "name" },
-    arc: { dir: path2.join("plot", "arcs"), titleField: "name" },
+    location: { dir: path8.join("worldbuilding", "locations"), titleField: "name" },
+    system: { dir: path8.join("worldbuilding", "systems"), titleField: "name" },
+    faction: { dir: path8.join("worldbuilding", "factions"), titleField: "name" },
+    artifact: { dir: path8.join("worldbuilding", "artifacts"), titleField: "name" },
+    arc: { dir: path8.join("plot", "arcs"), titleField: "name" },
     chapter: { dir: "chapters", titleField: "title" },
     scene: { dir: "scenes", titleField: "title" },
-    question: { dir: path2.join("continuity", "questions"), titleField: "title" },
-    promise: { dir: path2.join("continuity", "promises"), titleField: "title" },
-    term: { dir: path2.join("glossary", "terms"), titleField: "term" }
+    question: { dir: path8.join("continuity", "questions"), titleField: "title" },
+    promise: { dir: path8.join("continuity", "promises"), titleField: "title" },
+    term: { dir: path8.join("glossary", "terms"), titleField: "term" },
+    fact: { dir: path8.join("continuity", "facts"), titleField: "statement" },
+    knowledge: { dir: path8.join("continuity", "knowledge"), titleField: "character" },
+    relationship: { dir: path8.join("continuity", "relationships"), titleField: "id" }
   };
   const config = configs[kind];
   if (!config) {
@@ -1876,9 +4464,9 @@ function nextSceneNumber(project, chapter) {
   return project.scenes.filter((scene) => scene.chapter === chapter).reduce((max, scene) => Math.max(max, scene.scene), 0) + 1;
 }
 function ensureDirectory(directory, changed, root) {
-  if (!fs.existsSync(directory)) {
+  if (!fs2.existsSync(directory)) {
     assertLexicallyInsideRoot(directory, root);
-    fs.mkdirSync(directory, { recursive: true });
+    fs2.mkdirSync(directory, { recursive: true });
     assertSafeProjectDirectory(directory, root);
     changed.push(directory);
     return;
@@ -1886,7 +4474,7 @@ function ensureDirectory(directory, changed, root) {
   assertSafeProjectDirectory(directory, root);
 }
 function ensureFile(filePath, contents, changed, root) {
-  if (!fs.existsSync(filePath)) {
+  if (!fs2.existsSync(filePath)) {
     writeFile(filePath, contents, { root });
     changed.push(filePath);
     return;
@@ -1905,7 +4493,7 @@ function replaceEntityReferences(root, oldId, newId) {
 }
 function removeEntityReferences(root, id) {
   for (const file of markdownFiles(root)) {
-    if (!fs.existsSync(file)) {
+    if (!fs2.existsSync(file)) {
       continue;
     }
     const markdown = readMarkdown(file, root);
@@ -1919,21 +4507,21 @@ function applyEntityBacklinks(root, kind, id, data) {
   if (kind === "location") {
     for (const characterId of asArray(data["notable-characters"])) {
       if (isKebabId(characterId)) {
-        addFrontmatterListValue(root, path2.join("characters", `${characterId}.md`), "locations", id);
+        addFrontmatterListValue(root, path8.join("characters", `${characterId}.md`), "locations", id);
       }
     }
   }
   if (kind === "character") {
     for (const locationId of asArray(data.locations)) {
       if (isKebabId(locationId)) {
-        addFrontmatterListValue(root, path2.join("worldbuilding", "locations", `${locationId}.md`), "notable-characters", id);
+        addFrontmatterListValue(root, path8.join("worldbuilding", "locations", `${locationId}.md`), "notable-characters", id);
       }
     }
   }
 }
 function addFrontmatterListValue(root, relativePath, field, value) {
-  const filePath = path2.join(root, relativePath);
-  if (!fs.existsSync(filePath) || !value) {
+  const filePath = path8.join(root, relativePath);
+  if (!fs2.existsSync(filePath) || !value) {
     return;
   }
   assertSafeProjectPath(filePath, root);
@@ -1966,8 +4554,8 @@ function removeReferenceFromData(data, id) {
 }
 function markdownFiles(root) {
   const files = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    const fullPath = path2.join(root, entry.name);
+  for (const entry of fs2.readdirSync(root, { withFileTypes: true })) {
+    const fullPath = path8.join(root, entry.name);
     if (entry.isDirectory() && entry.name !== "dist" && !entry.name.startsWith(".")) {
       files.push(...markdownFiles(fullPath));
     } else if (entry.isFile() && entry.name.endsWith(".md")) {
@@ -2137,29 +4725,88 @@ for (let index = 0;index < 256; index += 1) {
 function xmlEscape(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-function readEntityFiles(root, relativeDir, mapEntity) {
-  const directory = path2.join(root, relativeDir);
-  if (!fs.existsSync(directory)) {
+function readCandidates(root) {
+  const workRoot = path8.join(root, "work", "chapters");
+  if (!fs2.existsSync(workRoot)) {
+    return [];
+  }
+  assertSafeProjectDirectory(workRoot, root);
+  const candidates = [];
+  for (const chapterDir of fs2.readdirSync(workRoot, { withFileTypes: true })) {
+    if (!chapterDir.isDirectory()) {
+      continue;
+    }
+    const directory = path8.join(workRoot, chapterDir.name);
+    assertSafeProjectDirectory(directory, root);
+    for (const entry of fs2.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) {
+        continue;
+      }
+      const file = path8.join(directory, entry.name);
+      const markdown = readMarkdown(file, root);
+      if (markdown.data.type !== "chapter-candidate") {
+        continue;
+      }
+      const data = markdown.data;
+      candidates.push({
+        id: path8.basename(entry.name, ".md"),
+        file,
+        chapter: data.chapter ?? chapterDir.name,
+        title: data.title ?? titleCaseSlug(chapterDir.name),
+        number: Number(data.number ?? chapterNumberFromFile(file) ?? 0),
+        status: data.status ?? "pending",
+        pov: data.pov ?? "",
+        review: data.review ?? "",
+        planVersion: data["plan-version"] ?? "",
+        renderPacketVersion: data["render-packet-version"] ?? "",
+        characters: asArray(data.characters),
+        mentions: asArray(data.mentions),
+        locations: asArray(data.locations),
+        arcsAdvanced: asArray(data["arcs-advanced"]),
+        storyTime: asMapping(data["story-time"]),
+        stateCharacters: asArray(data["state-characters"]),
+        stateObjects: asArray(data["state-objects"]),
+        stateRelationships: asArray(data["state-relationships"]),
+        knowledgeDelta: asArray(data["knowledge-delta"]),
+        promiseDelta: asArray(data["promise-delta"]),
+        questionDelta: asArray(data["question-delta"]),
+        activeThreads: asArray(data["active-threads"]),
+        readerKnowledge: asArray(data["reader-knowledge"]),
+        body: markdown.body,
+        rawData: data,
+        rawMarkdown: markdown.rawMarkdown
+      });
+    }
+  }
+  return candidates;
+}
+function readTransactions(root) {
+  const directory = path8.join(root, "transactions");
+  if (!fs2.existsSync(directory)) {
     return [];
   }
   assertSafeProjectDirectory(directory, root);
-  return fs.readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name !== "_index.md").map((entry) => entry.name).sort().map((file) => {
-    const fullPath = path2.join(directory, file);
-    const markdown = readMarkdown(fullPath, root);
-    return mapEntity(path2.basename(file, ".md"), fullPath, markdown.data, markdown);
+  return fs2.readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name).sort().map((name) => {
+    const file = path8.join(directory, name);
+    assertSafeProjectPath(file, root);
+    return {
+      id: path8.basename(name, ".json"),
+      file,
+      data: JSON.parse(fs2.readFileSync(file, "utf8"))
+    };
   });
 }
-function readMarkdown(filePath, root) {
-  if (root) {
-    assertSafeProjectPath(filePath, root);
+function readEntityFiles(root, relativeDir, mapEntity) {
+  const directory = path8.join(root, relativeDir);
+  if (!fs2.existsSync(directory)) {
+    return [];
   }
-  const rawMarkdown = fs.readFileSync(filePath, "utf8");
-  const parsed = parseFrontmatter(rawMarkdown, filePath);
-  return { ...parsed, rawMarkdown };
-}
-function writeFile(filePath, contents, options = {}) {
-  const target = prepareWriteTarget(filePath, options.root);
-  fs.writeFileSync(target, contents, "utf8");
+  assertSafeProjectDirectory(directory, root);
+  return fs2.readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name !== "_index.md").map((entry) => entry.name).sort().map((file) => {
+    const fullPath = path8.join(directory, file);
+    const markdown = readMarkdown(fullPath, root);
+    return mapEntity(path8.basename(file, ".md"), fullPath, markdown.data, markdown);
+  });
 }
 function writeChanged(filePath, contents, changed, root) {
   if (safeRead(filePath, root) !== contents) {
@@ -2167,86 +4814,18 @@ function writeChanged(filePath, contents, changed, root) {
     changed.push(filePath);
   }
 }
-function safeRead(filePath, root) {
-  if (!fs.existsSync(filePath)) {
-    return "";
-  }
-  if (root) {
-    assertSafeProjectPath(filePath, root);
-  }
-  return fs.readFileSync(filePath, "utf8");
-}
 function resolveOutputPath(project, out, defaultRelativePath, enforceRoot) {
   const rawOut = out ?? defaultRelativePath;
-  const outFile = path2.resolve(project.root, rawOut);
-  const shouldEnforceRoot = enforceRoot ?? !path2.isAbsolute(String(rawOut));
+  const outFile = path8.resolve(project.root, rawOut);
+  const shouldEnforceRoot = enforceRoot ?? !path8.isAbsolute(String(rawOut));
   return {
     outFile,
     enforceRoot: shouldEnforceRoot,
     writeOptions: shouldEnforceRoot ? { root: project.root } : {}
   };
 }
-function prepareWriteTarget(filePath, root) {
-  const target = path2.resolve(filePath);
-  if (root) {
-    assertLexicallyInsideRoot(target, root);
-  }
-  fs.mkdirSync(path2.dirname(target), { recursive: true });
-  if (root) {
-    assertSafeProjectParent(target, root);
-  }
-  rejectSymlinkTarget(target);
-  return target;
-}
-function assertSafeProjectPath(filePath, root) {
-  const target = path2.resolve(filePath);
-  assertLexicallyInsideRoot(target, root);
-  assertSafeProjectParent(target, root);
-  rejectSymlinkTarget(target);
-}
-function assertSafeProjectDirectory(directory, root) {
-  const target = path2.resolve(directory);
-  assertLexicallyInsideRoot(target, root);
-  const stats = lstatIfExists(target);
-  if (stats) {
-    if (stats.isSymbolicLink()) {
-      throw new Error(`Refusing to use symlinked project directory: ${target}`);
-    }
-    if (!stats.isDirectory()) {
-      throw new Error(`Project path is not a directory: ${target}`);
-    }
-  }
-  const rootReal = fs.realpathSync(path2.resolve(root));
-  const directoryReal = fs.realpathSync(target);
-  if (!isPathInside(rootReal, directoryReal)) {
-    throw new Error(`Refusing to use project directory outside root: ${target}`);
-  }
-}
-function assertSafeProjectParent(filePath, root) {
-  const rootReal = fs.realpathSync(path2.resolve(root));
-  const parentReal = fs.realpathSync(path2.dirname(path2.resolve(filePath)));
-  if (!isPathInside(rootReal, parentReal)) {
-    throw new Error(`Refusing to access project path outside root: ${filePath}`);
-  }
-}
-function assertLexicallyInsideRoot(filePath, root) {
-  const rootPath = path2.resolve(root);
-  const target = path2.resolve(filePath);
-  if (!isPathInside(rootPath, target)) {
-    throw new Error(`Refusing to access path outside project root: ${target}`);
-  }
-}
-function rejectSymlinkTarget(filePath) {
-  if (lstatIfExists(filePath)?.isSymbolicLink()) {
-    throw new Error(`Refusing to write through symlink: ${filePath}`);
-  }
-}
-function lstatIfExists(filePath) {
-  return fs.lstatSync(filePath, { throwIfNoEntry: false }) ?? null;
-}
-function isPathInside(root, target) {
-  const relativePath = path2.relative(root, target);
-  return relativePath === "" || !relativePath.startsWith("..") && !path2.isAbsolute(relativePath);
+function asMapping(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -2285,14 +4864,15 @@ function validateStoryFrontmatter(project, errors) {
   requireScalar(data, "tense", "story.md", errors);
   validateEnum(data, "status", STORY_STATUSES, "story.md", errors);
   validateEnum(data, "tense", STORY_TENSES, "story.md", errors);
-  if (data["schema-version"] !== undefined && data["schema-version"] !== STORY_SCHEMA_VERSION) {
-    errors.push(`story.md schema-version must be ${STORY_SCHEMA_VERSION}`);
+  const declaredVersion = data["schema-version"];
+  if (declaredVersion !== undefined && declaredVersion !== STORY_SCHEMA_VERSION && !LEGACY_SCHEMA_VERSIONS.has(declaredVersion)) {
+    errors.push(`story.md schema-version must be ${STORY_SCHEMA_VERSION} (legacy ${[...LEGACY_SCHEMA_VERSIONS].join(", ")} still accepted)`);
   }
 }
 function validateIndexFrontmatter(project, errors) {
   for (const [relativePath, expectedType] of INDEX_SCHEMAS) {
     const label = relativePath;
-    const data = readMarkdown(path2.join(project.root, relativePath), project.root).data;
+    const data = readMarkdown(path8.join(project.root, relativePath), project.root).data;
     requireFields(data, ["type", "story"], label, errors);
     requireScalar(data, "type", label, errors);
     requireScalar(data, "story", label, errors);
@@ -2302,7 +4882,7 @@ function validateIndexFrontmatter(project, errors) {
     if (data.story !== undefined && data.story !== project.storyId) {
       errors.push(`${label} story must be ${project.storyId}`);
     }
-    if (relativePath === path2.join("plot", "_index.md")) {
+    if (relativePath === path8.join("plot", "_index.md")) {
       requireFields(data, ["structure"], label, errors);
       requireScalar(data, "structure", label, errors);
     }
@@ -2310,7 +4890,7 @@ function validateIndexFrontmatter(project, errors) {
 }
 function validateCharacters(project, errors) {
   for (const character of project.characters) {
-    const label = relative2(project, character.file);
+    const label = relative6(project, character.file);
     const data = readMarkdown(character.file, project.root).data;
     validateEntityId(character.id, label, errors);
     requireFields(data, ["name", "role", "status"], label, errors);
@@ -2330,7 +4910,7 @@ function validateCharacters(project, errors) {
 }
 function validateLocations(project, errors) {
   for (const location of project.locations) {
-    const label = relative2(project, location.file);
+    const label = relative6(project, location.file);
     const data = readMarkdown(location.file, project.root).data;
     validateEntityId(location.id, label, errors);
     requireFields(data, ["name", "type"], label, errors);
@@ -2342,7 +4922,7 @@ function validateLocations(project, errors) {
 }
 function validateSystems(project, errors) {
   for (const system of project.systems) {
-    const label = relative2(project, system.file);
+    const label = relative6(project, system.file);
     const data = readMarkdown(system.file, project.root).data;
     validateEntityId(system.id, label, errors);
     requireFields(data, ["name", "type"], label, errors);
@@ -2355,7 +4935,7 @@ function validateSystems(project, errors) {
 }
 function validateFactions(project, errors) {
   for (const faction of project.factions) {
-    const label = relative2(project, faction.file);
+    const label = relative6(project, faction.file);
     const data = readMarkdown(faction.file, project.root).data;
     validateEntityId(faction.id, label, errors);
     requireFields(data, ["name", "type", "status"], label, errors);
@@ -2371,7 +4951,7 @@ function validateFactions(project, errors) {
 }
 function validateArtifacts(project, errors) {
   for (const artifact of project.artifacts) {
-    const label = relative2(project, artifact.file);
+    const label = relative6(project, artifact.file);
     const data = readMarkdown(artifact.file, project.root).data;
     validateEntityId(artifact.id, label, errors);
     requireFields(data, ["name", "type", "status"], label, errors);
@@ -2387,7 +4967,7 @@ function validateArtifacts(project, errors) {
 }
 function validateArcs(project, errors) {
   for (const arc of project.arcs) {
-    const label = relative2(project, arc.file);
+    const label = relative6(project, arc.file);
     const data = readMarkdown(arc.file, project.root).data;
     validateEntityId(arc.id, label, errors);
     requireFields(data, ["name", "type", "status"], label, errors);
@@ -2404,7 +4984,7 @@ function validateArcs(project, errors) {
 function validateChapters(project, errors) {
   const seenNumbers = new Map;
   for (const chapter of project.chapters) {
-    const label = relative2(project, chapter.file);
+    const label = relative6(project, chapter.file);
     const data = readMarkdown(chapter.file, project.root).data;
     const filenameNumber = chapterNumberFromFile(chapter.file);
     validateEntityId(chapter.id, label, errors);
@@ -2443,7 +5023,7 @@ function validateChapters(project, errors) {
 }
 function validateScenes(project, errors) {
   for (const scene of project.scenes) {
-    const label = relative2(project, scene.file);
+    const label = relative6(project, scene.file);
     const data = readMarkdown(scene.file, project.root).data;
     validateEntityId(scene.id, label, errors);
     requireFields(data, ["title", "chapter", "scene", "status"], label, errors);
@@ -2468,7 +5048,7 @@ function validateScenes(project, errors) {
   }
 }
 function validateContinuityState(project, errors) {
-  const label = path2.join("continuity", "state.md");
+  const label = path8.join("continuity", "state.md");
   const data = project.continuity.data;
   requireFields(data, ["type", "story", "current-chapter"], label, errors);
   requireScalar(data, "type", label, errors);
@@ -2486,7 +5066,7 @@ function validateContinuityState(project, errors) {
 }
 function validateQuestions(project, errors) {
   for (const question of project.questions) {
-    const label = relative2(project, question.file);
+    const label = relative6(project, question.file);
     const data = readMarkdown(question.file, project.root).data;
     validateEntityId(question.id, label, errors);
     requireFields(data, ["title", "status"], label, errors);
@@ -2500,7 +5080,7 @@ function validateQuestions(project, errors) {
 }
 function validatePromises(project, errors) {
   for (const promise of project.promises) {
-    const label = relative2(project, promise.file);
+    const label = relative6(project, promise.file);
     const data = readMarkdown(promise.file, project.root).data;
     validateEntityId(promise.id, label, errors);
     requireFields(data, ["title", "status"], label, errors);
@@ -2515,7 +5095,7 @@ function validatePromises(project, errors) {
 }
 function validateGlossaryTerms(project, errors) {
   for (const term of project.glossaryTerms) {
-    const label = relative2(project, term.file);
+    const label = relative6(project, term.file);
     const data = readMarkdown(term.file, project.root).data;
     validateEntityId(term.id, label, errors);
     requireFields(data, ["term", "category"], label, errors);
@@ -2523,6 +5103,48 @@ function validateGlossaryTerms(project, errors) {
     requireScalar(data, "category", label, errors);
     validateEnum(data, "category", TERM_CATEGORIES, label, errors);
     validateStringArray(data, "aliases", label, errors);
+  }
+}
+function validateV3Structure(project, errors) {
+  for (const fact of project.facts) {
+    const label = relative6(project, fact.file);
+    validateEntityId(fact.id, label, errors);
+    requireFields(fact.rawData, ["statement"], label, errors);
+    requireScalar(fact.rawData, "statement", label, errors);
+    requireExactType(fact.rawData, "fact", label, errors);
+  }
+  for (const record of project.knowledge) {
+    const label = relative6(project, record.file);
+    validateEntityId(record.id, label, errors);
+    requireFields(record.rawData, ["character", "facts"], label, errors);
+    requireScalar(record.rawData, "character", label, errors);
+    validateObjectArray(record.rawData, "facts", label, errors);
+    requireExactType(record.rawData, "knowledge-record", label, errors);
+  }
+  for (const relationship of project.relationships) {
+    const label = relative6(project, relationship.file);
+    validateEntityId(relationship.id, label, errors);
+    requireFields(relationship.rawData, ["participants"], label, errors);
+    validateStringArray(relationship.rawData, "participants", label, errors);
+    requireExactType(relationship.rawData, "relationship", label, errors);
+  }
+  for (const snapshot of project.stateSnapshots) {
+    const label = relative6(project, snapshot.file);
+    requireFields(snapshot.rawData, ["sequence"], label, errors);
+    requireInteger(snapshot.rawData, "sequence", label, errors);
+    validateObjectArray(snapshot.rawData, "characters", label, errors);
+    validateObjectArray(snapshot.rawData, "objects", label, errors);
+    validateObjectArray(snapshot.rawData, "relationships", label, errors);
+    requireExactType(snapshot.rawData, "state-snapshot", label, errors);
+  }
+  if (project.currentState) {
+    const label = path8.join("continuity", "state", "current.md");
+    requireExactType(project.currentState.data, "state-current", label, errors);
+  }
+}
+function requireExactType(data, expected, label, errors) {
+  if (data.type !== undefined && data.type !== expected) {
+    errors.push(`${label} type must be ${expected}`);
   }
 }
 function validateEntityId(id, label, errors) {
@@ -2619,11 +5241,11 @@ function requireFields(data, fields, label, errors) {
   }
 }
 function chapterNumberFromFile(file) {
-  const match = /chapter-(\d+)/.exec(path2.basename(file));
+  const match = /chapter-(\d+)/.exec(path8.basename(file));
   return match ? Number.parseInt(match[1], 10) : 0;
 }
-function relative2(project, file) {
-  return path2.relative(project.root, file);
+function relative6(project, file) {
+  return path8.relative(project.root, file);
 }
 
 // src/import.js
@@ -2677,8 +5299,8 @@ function importManuscript(options) {
     throw new Error("An import source file or directory is required");
   }
   const cwd = options.cwd ?? process.cwd();
-  const source = path3.resolve(cwd, rawSource);
-  if (!fs2.existsSync(source)) {
+  const source = path9.resolve(cwd, rawSource);
+  if (!fs3.existsSync(source)) {
     throw new Error(`Import source not found: ${source}`);
   }
   const chapters = splitChapters(readSourceDocuments(source));
@@ -2695,7 +5317,7 @@ function importManuscript(options) {
     themes: options.themes,
     pov: options.pov,
     tense: options.tense,
-    synopsis: options.synopsis ?? `Imported from ${path3.basename(source)}. Replace with a 2-3 sentence synopsis.`,
+    synopsis: options.synopsis ?? `Imported from ${path9.basename(source)}. Replace with a 2-3 sentence synopsis.`,
     force: options.force
   });
   let totalWords = 0;
@@ -2703,8 +5325,8 @@ function importManuscript(options) {
     const number = index + 1;
     const words = wordCount(chapter.prose);
     totalWords += words;
-    const file = path3.join(created.root, "chapters", `chapter-${String(number).padStart(2, "0")}.md`);
-    fs2.writeFileSync(file, chapterMarkdown(chapter.title, number, words, chapter.prose), "utf8");
+    const file = path9.join(created.root, "chapters", `chapter-${String(number).padStart(2, "0")}.md`);
+    fs3.writeFileSync(file, chapterMarkdown(chapter.title, number, words, chapter.prose), "utf8");
   });
   reindexProject(created.root);
   return {
@@ -2739,10 +5361,10 @@ function addCandidate(counts, name) {
   counts.set(name, (counts.get(name) ?? 0) + 1);
 }
 function readSourceDocuments(source) {
-  if (fs2.statSync(source).isFile()) {
-    return [{ name: path3.basename(source), text: fs2.readFileSync(source, "utf8") }];
+  if (fs3.statSync(source).isFile()) {
+    return [{ name: path9.basename(source), text: fs3.readFileSync(source, "utf8") }];
   }
-  const documents = fs2.readdirSync(source, { withFileTypes: true }).filter((entry) => entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name)).map((entry) => entry.name).sort().map((name) => ({ name, text: fs2.readFileSync(path3.join(source, name), "utf8") }));
+  const documents = fs3.readdirSync(source, { withFileTypes: true }).filter((entry) => entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name)).map((entry) => entry.name).sort().map((name) => ({ name, text: fs3.readFileSync(path9.join(source, name), "utf8") }));
   if (documents.length === 0) {
     throw new Error(`No markdown or text files found in ${source}`);
   }
@@ -2806,7 +5428,7 @@ function singleChapter(text, fileName) {
     };
   }
   return {
-    title: titleCaseSlug(path3.basename(fileName, path3.extname(fileName))),
+    title: titleCaseSlug(path9.basename(fileName, path9.extname(fileName))),
     prose: text.trim()
   };
 }
@@ -2843,6 +5465,22 @@ Commands:
   links [path]       Check cross-reference targets and backlinks
   continuity [path]  Check deterministic continuity contracts: deaths,
                     promises, questions, casts, and durable state
+  state [path]       Show accepted narrative state; --chapter for a snapshot,
+                    --character for one trajectory across the book
+  knowledge [path]   Show character knowledge; --character to focus one
+  know [path]        Record what a character knows about a fact
+  candidate [path]   Scaffold a chapter candidate in work/chapters/
+  candidates [path]  List candidates and whether their chapter is canon
+  accept [path]      Accept a candidate: commit chapter, state, and transaction
+  reject [path]      Reject a candidate without touching canon
+  transaction [path] Show the acceptance transaction for a chapter
+  context [path]     Build a POV-safe context projection for a chapter
+  render-packet [path]
+                    Build the compact prose-facing packet for a chapter
+  seal-arc [path]    Freeze the current arc plan as a new sealed version
+  simulate-arc [path]
+                    Build the causal-simulation brief for an arc
+  prose [path]       Report prose repetition signals; never fails a check
   report [path]      Summarize project inventory, progress, and checks
   next [path]        Recommend the next writing and maintenance actions
   doctor [path]      Show health checks plus actionable repair steps
@@ -2877,7 +5515,9 @@ Options:
   --scene <n>               Scene number for add scene
   --type <name>             Entity type for add
   --role <name>             Character role for add character
-  --status <name>           Entity status for add
+  --status <name>           Entity status for add; epistemic status for know
+                            (knows, believes, suspects, doubts, misbelieves,
+                            unknown)
   --location <id>           Location reference for add
   --character <id>          Character reference for add; repeatable
   --member <id>             Faction member reference for add faction; repeatable
@@ -2888,6 +5528,25 @@ Options:
   --planted <id>            Chapter id for add promise
   --payoff <id>             Chapter id for add promise
   --category <name>         Category for add term
+  --fact <id>               Fact id for know
+  --learned-in <id>         Chapter id (or pre-story) for know
+  --confidence <level>      Confidence for know: low, medium, high
+  --source <text>           How the character learned it
+  --notes <text>            Free-form note for know
+  --truth-status <name>     Truth for add fact: true, false, ambiguous,
+                            undetermined
+  --established-in <id>     Chapter id (or pre-story) for add fact
+  --tag <name>              Tag for add fact; repeatable
+  --candidate <id>          Candidate id for accept/reject
+  --pov <id>                POV character for context/render-packet
+  --json                    Emit machine-readable JSON for context
+  --write                   Write the render packet into work/chapters/
+  --word-target <n>         Target word count for the render packet
+  --arc <id>                Arc id for seal-arc
+  --limit <n>               Max repeated phrases to report for prose
+  --reason <text>           Rejection note for reject
+  --title <name>            Chapter title for candidate
+  --mention <id>            Mentioned character for candidate; repeatable
   --alias <name>            Alias for add term; repeatable
   -h, --help                Show this help
 
@@ -2948,7 +5607,7 @@ function runCli(argv, io) {
       }
       return 0;
     }
-    const root = path4.resolve(cwd, parsed.positionals[1] ?? ".");
+    const root = path10.resolve(cwd, parsed.positionals[1] ?? ".");
     if (command === "validate") {
       return reportResult(io, validateProject(root), "Project is valid", "Project validation failed");
     }
@@ -2957,6 +5616,88 @@ function runCli(argv, io) {
     }
     if (command === "continuity") {
       return reportResult(io, checkProjectContinuity(root), "Continuity is consistent", "Continuity check failed");
+    }
+    if (command === "state") {
+      io.stdout.write(formatStateReport(stateReport(root, { chapter: parsed.options.chapter, character: parsed.options.character })));
+      return 0;
+    }
+    if (command === "knowledge") {
+      io.stdout.write(formatKnowledgeReport(knowledgeReport(root, { character: parsed.options.character })));
+      return 0;
+    }
+    if (command === "know") {
+      const result = recordKnowledge(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Recorded ${result.character} ${result.status} ${result.fact}
+`);
+      return 0;
+    }
+    if (command === "candidate") {
+      const result = createCandidate(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Created ${result.candidate} for ${result.chapter}: ${result.file}` + `
+`);
+      return 0;
+    }
+    if (command === "candidates") {
+      const result = listCandidates(root, { chapter: parsed.options.chapter });
+      if (result.candidates.length === 0) {
+        io.stdout.write("No candidates found" + `
+`);
+        return 0;
+      }
+      for (const candidate of result.candidates) {
+        io.stdout.write(`${candidate.chapter} ${candidate.id} ${candidate.status} ${candidate.words} words${candidate.canonical ? " (chapter is canon)" : ""}` + `
+`);
+      }
+      return 0;
+    }
+    if (command === "accept") {
+      const result = acceptCandidate(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Accepted ${result.candidate} as ${result.chapter} (${result.stateBefore} -> ${result.stateAfter}, body ${result.bodyHash.slice(0, 12)})` + `
+`);
+      return 0;
+    }
+    if (command === "reject") {
+      const result = rejectCandidate(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Rejected ${result.candidate} for ${result.chapter}; canon unchanged` + `
+`);
+      return 0;
+    }
+    if (command === "transaction") {
+      io.stdout.write(`${JSON.stringify(readTransactionRecord(root, parsed.options), null, 2)}` + `
+`);
+      return 0;
+    }
+    if (command === "context") {
+      const projection = contextProjection(root, parsed.options);
+      io.stdout.write(parsed.options.json ? `${JSON.stringify(projection, null, 2)}` + `
+` : formatContextProjection(projection));
+      return 0;
+    }
+    if (command === "render-packet") {
+      const result = renderPacket(root, parsed.options);
+      io.stdout.write(result.file ? `Wrote render packet: ${result.file}` + `
+` : `${JSON.stringify(result.packet, null, 2)}` + `
+`);
+      return 0;
+    }
+    if (command === "prose") {
+      const report = proseDiagnostics(root, parsed.options);
+      io.stdout.write(parsed.options.json ? `${JSON.stringify(report, null, 2)}` + `
+` : formatProseReport(report));
+      return 0;
+    }
+    if (command === "simulate-arc") {
+      const result = arcSimulation(root, parsed.options);
+      io.stdout.write(result.file ? `Wrote arc simulation brief: ${result.file}` + `
+` : `${JSON.stringify(result.brief, null, 2)}` + `
+`);
+      return 0;
+    }
+    if (command === "seal-arc") {
+      const result = sealArc(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Sealed ${result.arc} as ${result.id} (version ${result.version})` + `
+`);
+      return 0;
     }
     if (command === "report") {
       io.stdout.write(formatProjectReport(projectReport(root), { actionable: Boolean(parsed.options.actionable) }));
@@ -3084,7 +5825,7 @@ function collectThemes(options) {
   return [].concat(options.theme ?? []).concat(options.themes ?? []).filter((value) => value !== undefined && value !== true);
 }
 function targetRoot(cwd, parsed) {
-  return path4.resolve(cwd, parsed.options.path ?? ".");
+  return path10.resolve(cwd, parsed.options.path ?? ".");
 }
 function reportResult(io, result, successMessage, failureMessage) {
   const output = result.ok ? io.stdout : io.stderr;

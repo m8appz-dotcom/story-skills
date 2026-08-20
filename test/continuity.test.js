@@ -4,6 +4,7 @@ import path from "node:path";
 import { checkContinuity } from "../src/continuity.js";
 import {
   checkProjectContinuity,
+  createEntity,
   createStoryProject,
   formatActionReport,
   projectActions,
@@ -359,4 +360,32 @@ status: alive
     fs.rmSync(path.join(created.root, "continuity", "state.md"));
     expect(checkContinuity(scanProject(created.root)).ok).toBe(true);
   });
+  test("lets a novel widen the Chekhov gap instead of nagging every chapter", () => {
+    const cwd = makeTempDir();
+    const created = createStoryProject({ cwd, title: "Long Book", force: false });
+    createEntity(created.root, { kind: "character", name: "Sarah", role: "protagonist" });
+    for (const number of [1, 2, 3, 4, 5]) {
+      createEntity(created.root, { kind: "chapter", name: `Chapter ${number}`, number });
+    }
+    createEntity(created.root, {
+      kind: "promise",
+      name: "The rope will matter",
+      status: "planted",
+      planted: "chapter-01"
+    });
+
+    // Default gap of 3 fires: planted five chapters ago.
+    expect(checkProjectContinuity(created.root).warnings.join("\n")).toContain("has no payoff yet");
+
+    const storyPath = path.join(created.root, "story.md");
+    fs.writeFileSync(
+      storyPath,
+      fs.readFileSync(storyPath, "utf8").replace("status: planning", "status: planning\nchekhov-gap: 20"),
+      "utf8"
+    );
+
+    // A setup planted in chapter one and paid in chapter thirty is the form working.
+    expect(checkProjectContinuity(created.root).warnings.join("\n")).not.toContain("has no payoff yet");
+  });
+
 });

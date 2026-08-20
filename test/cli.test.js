@@ -149,7 +149,7 @@ word-count: 0
     fs.rmSync(path.join(root, "scenes"), { recursive: true, force: true });
     fs.writeFileSync(
       path.join(root, "story.md"),
-      fs.readFileSync(path.join(root, "story.md"), "utf8").replace("schema-version: 2", "schema-version: 1"),
+      fs.readFileSync(path.join(root, "story.md"), "utf8").replace("schema-version: 3", "schema-version: 2"),
       "utf8"
     );
     const migrated = invoke(cwd, ["migrate", root]);

@@ -1,19 +1,36 @@
 import path from "node:path";
 import { importManuscript } from "./import.js";
+import { formatProseReport } from "./prose-diagnostics.js";
 import {
+  acceptCandidate,
+  arcSimulation,
   buildBook,
   checkProjectContinuity,
+  contextProjection,
+  createCandidate,
   computeWordCounts,
   createEntity,
   createStoryProject,
   exportManuscript,
   formatActionReport,
   formatDoctorReport,
+  formatContextProjection,
+  formatKnowledgeReport,
   formatProjectReport,
+  formatStateReport,
   migrateProject,
+  knowledgeReport,
+  listCandidates,
   projectReport,
   projectActions,
+  readTransactionRecord,
+  proseDiagnostics,
+  recordKnowledge,
   reindexProject,
+  rejectCandidate,
+  renderPacket,
+  sealArc,
+  stateReport,
   removeEntity,
   renameEntity,
   validateLinks,
@@ -31,6 +48,22 @@ Commands:
   links [path]       Check cross-reference targets and backlinks
   continuity [path]  Check deterministic continuity contracts: deaths,
                     promises, questions, casts, and durable state
+  state [path]       Show accepted narrative state; --chapter for a snapshot,
+                    --character for one trajectory across the book
+  knowledge [path]   Show character knowledge; --character to focus one
+  know [path]        Record what a character knows about a fact
+  candidate [path]   Scaffold a chapter candidate in work/chapters/
+  candidates [path]  List candidates and whether their chapter is canon
+  accept [path]      Accept a candidate: commit chapter, state, and transaction
+  reject [path]      Reject a candidate without touching canon
+  transaction [path] Show the acceptance transaction for a chapter
+  context [path]     Build a POV-safe context projection for a chapter
+  render-packet [path]
+                    Build the compact prose-facing packet for a chapter
+  seal-arc [path]    Freeze the current arc plan as a new sealed version
+  simulate-arc [path]
+                    Build the causal-simulation brief for an arc
+  prose [path]       Report prose repetition signals; never fails a check
   report [path]      Summarize project inventory, progress, and checks
   next [path]        Recommend the next writing and maintenance actions
   doctor [path]      Show health checks plus actionable repair steps
@@ -65,7 +98,9 @@ Options:
   --scene <n>               Scene number for add scene
   --type <name>             Entity type for add
   --role <name>             Character role for add character
-  --status <name>           Entity status for add
+  --status <name>           Entity status for add; epistemic status for know
+                            (knows, believes, suspects, doubts, misbelieves,
+                            unknown)
   --location <id>           Location reference for add
   --character <id>          Character reference for add; repeatable
   --member <id>             Faction member reference for add faction; repeatable
@@ -76,6 +111,25 @@ Options:
   --planted <id>            Chapter id for add promise
   --payoff <id>             Chapter id for add promise
   --category <name>         Category for add term
+  --fact <id>               Fact id for know
+  --learned-in <id>         Chapter id (or pre-story) for know
+  --confidence <level>      Confidence for know: low, medium, high
+  --source <text>           How the character learned it
+  --notes <text>            Free-form note for know
+  --truth-status <name>     Truth for add fact: true, false, ambiguous,
+                            undetermined
+  --established-in <id>     Chapter id (or pre-story) for add fact
+  --tag <name>              Tag for add fact; repeatable
+  --candidate <id>          Candidate id for accept/reject
+  --pov <id>                POV character for context/render-packet
+  --json                    Emit machine-readable JSON for context
+  --write                   Write the render packet into work/chapters/
+  --word-target <n>         Target word count for the render packet
+  --arc <id>                Arc id for seal-arc
+  --limit <n>               Max repeated phrases to report for prose
+  --reason <text>           Rejection note for reject
+  --title <name>            Chapter title for candidate
+  --mention <id>            Mentioned character for candidate; repeatable
   --alias <name>            Alias for add term; repeatable
   -h, --help                Show this help
 
@@ -148,6 +202,95 @@ export function runCli(argv, io) {
 
     if (command === "continuity") {
       return reportResult(io, checkProjectContinuity(root), "Continuity is consistent", "Continuity check failed");
+    }
+
+    if (command === "state") {
+      io.stdout.write(formatStateReport(stateReport(root, { chapter: parsed.options.chapter, character: parsed.options.character })));
+      return 0;
+    }
+
+    if (command === "knowledge") {
+      io.stdout.write(formatKnowledgeReport(knowledgeReport(root, { character: parsed.options.character })));
+      return 0;
+    }
+
+    if (command === "know") {
+      const result = recordKnowledge(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Recorded ${result.character} ${result.status} ${result.fact}\n`);
+      return 0;
+    }
+
+    if (command === "candidate") {
+      const result = createCandidate(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Created ${result.candidate} for ${result.chapter}: ${result.file}` + "\n");
+      return 0;
+    }
+
+    if (command === "candidates") {
+      const result = listCandidates(root, { chapter: parsed.options.chapter });
+      if (result.candidates.length === 0) {
+        io.stdout.write("No candidates found" + "\n");
+        return 0;
+      }
+      for (const candidate of result.candidates) {
+        io.stdout.write(`${candidate.chapter} ${candidate.id} ${candidate.status} ${candidate.words} words${candidate.canonical ? " (chapter is canon)" : ""}` + "\n");
+      }
+      return 0;
+    }
+
+    if (command === "accept") {
+      const result = acceptCandidate(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Accepted ${result.candidate} as ${result.chapter} (${result.stateBefore} -> ${result.stateAfter}, body ${result.bodyHash.slice(0, 12)})` + "\n");
+      return 0;
+    }
+
+    if (command === "reject") {
+      const result = rejectCandidate(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Rejected ${result.candidate} for ${result.chapter}; canon unchanged` + "\n");
+      return 0;
+    }
+
+    if (command === "transaction") {
+      io.stdout.write(`${JSON.stringify(readTransactionRecord(root, parsed.options), null, 2)}` + "\n");
+      return 0;
+    }
+
+    if (command === "context") {
+      const projection = contextProjection(root, parsed.options);
+      io.stdout.write(parsed.options.json
+        ? `${JSON.stringify(projection, null, 2)}` + "\n"
+        : formatContextProjection(projection));
+      return 0;
+    }
+
+    if (command === "render-packet") {
+      const result = renderPacket(root, parsed.options);
+      io.stdout.write(result.file
+        ? `Wrote render packet: ${result.file}` + "\n"
+        : `${JSON.stringify(result.packet, null, 2)}` + "\n");
+      return 0;
+    }
+
+    if (command === "prose") {
+      const report = proseDiagnostics(root, parsed.options);
+      io.stdout.write(parsed.options.json
+        ? `${JSON.stringify(report, null, 2)}` + "\n"
+        : formatProseReport(report));
+      return 0;
+    }
+
+    if (command === "simulate-arc") {
+      const result = arcSimulation(root, parsed.options);
+      io.stdout.write(result.file
+        ? `Wrote arc simulation brief: ${result.file}` + "\n"
+        : `${JSON.stringify(result.brief, null, 2)}` + "\n");
+      return 0;
+    }
+
+    if (command === "seal-arc") {
+      const result = sealArc(targetRoot(cwd, parsed), parsed.options);
+      io.stdout.write(`Sealed ${result.arc} as ${result.id} (version ${result.version})` + "\n");
+      return 0;
     }
 
     if (command === "report") {

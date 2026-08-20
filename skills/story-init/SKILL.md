@@ -62,6 +62,10 @@ If neither command is available, create the files manually using the steps below
 │   └── _index.md
 ├── continuity/
 │   ├── state.md
+│   ├── facts/              # objective world truth
+│   ├── knowledge/          # what each character believes about it
+│   ├── relationships/      # qualitative relationship state
+│   ├── state/              # one append-only snapshot per accepted chapter
 │   ├── questions/
 │   │   └── _index.md
 │   └── promises/
@@ -78,7 +82,7 @@ If neither command is available, create the files manually using the steps below
 ```yaml
 ---
 title: "{Title}"
-schema-version: 2
+schema-version: 3
 genre: {genre}
 sub-genre: {sub-genre}
 setting-era: {era}
@@ -219,10 +223,14 @@ story: {story-title-kebab}
 ## Total Word Count: 0
 ```
 
-Also create the v2 support files:
+Also create the supporting registry and state files:
 
 - `scenes/_index.md` with frontmatter `type: scene-registry`
 - `continuity/state.md` with frontmatter `type: continuity-state`, `current-chapter: 0`, and empty `character-state`, `object-state`, and `knowledge-state` lists
+- `continuity/facts/_index.md`, `continuity/knowledge/_index.md`, and
+  `continuity/relationships/_index.md` registries
+- `continuity/state/_index.md`, `continuity/state/chapter-00.md` (the pre-story
+  snapshot), and `continuity/state/current.md` (a generated pointer)
 - `continuity/questions/_index.md` with frontmatter `type: question-registry`
 - `continuity/promises/_index.md` with frontmatter `type: promise-registry`
 - `glossary/_index.md` with frontmatter `type: glossary-registry`
@@ -249,7 +257,8 @@ These conventions apply across ALL story skills:
 
 - **Kebab-case filenames** for all entity files (e.g., `sera-voss.md`, `ashen-citadel.md`)
 - **YAML frontmatter** on every file for structured metadata
-- **Schema version** - `story.md` frontmatter includes `schema-version: 2`
+- **Schema version** - `story.md` frontmatter includes `schema-version: 3`.
+  Projects declaring `2` remain valid; `story migrate .` upgrades them
 - **`_index.md`** files are authoritative registries for each domain
 - **`story.md`** is the top-level bible read by all skills for context
 - **Bidirectional cross-links** - when referencing another entity, update both files
@@ -258,5 +267,14 @@ These conventions apply across ALL story skills:
 - **`mentions` vs `characters`** - chapter and scene frontmatter lists characters present in-scene under `characters`; characters who are only referenced, remembered, recorded, or seen in flashback go under `mentions`
 - **Scene identifiers** use `chapter-{NN}-scene-{NN}` and live in `scenes/`
 - **Continuity state** lives in `continuity/state.md`, with open questions and promises tracked under `continuity/questions/` and `continuity/promises/`
+- **Versioned state** lives in `continuity/state/`, one append-only snapshot per
+  accepted chapter. `current.md` is generated and points at the latest one
+- **World truth and character belief are separate.** `continuity/facts/` holds
+  what is objectively true; `continuity/knowledge/` holds what each character
+  knows, believes, suspects, doubts, or misbelieves about it. Do not collapse them
+- **Progressive adoption** - the v3 directories start empty and stay empty until
+  the story needs them. A short story never has to configure an epistemic graph;
+  reach for facts and knowledge when a reveal depends on who knows what, and for
+  candidates and transactions when drafts must not be able to corrupt canon
 - **Markdown-first artifacts** - create and edit story content directly in the target `.md` files. Do not create project-local build scripts, generator scripts, or bulk writer scripts (for example `build-*.js`) to emit story files.
 - **CLI helpers stay external** - the only JavaScript helper agents should run is the installed or bundled Story CLI (`story`, `bun run story --`, or `story-maintenance/scripts/story.js`) for deterministic maintenance. Do not copy it into the user's story project, and remove any unavoidable scratch helper before finishing.
