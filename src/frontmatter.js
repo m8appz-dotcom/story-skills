@@ -18,24 +18,9 @@ export function stringifyFrontmatter(data) {
 
   for (const [key, value] of Object.entries(data)) {
     if (Array.isArray(value)) {
-      if (value.length === 0) {
-        lines.push(`${key}: []`);
-        continue;
-      }
-
-      lines.push(`${key}:`);
-      for (const item of value) {
-        if (isPlainObject(item)) {
-          const entries = Object.entries(item);
-          const [firstKey, firstValue] = entries[0];
-          lines.push(`  - ${firstKey}: ${formatScalar(firstValue)}`);
-          for (const [childKey, childValue] of entries.slice(1)) {
-            lines.push(`    ${childKey}: ${formatScalar(childValue)}`);
-          }
-        } else {
-          lines.push(`  - ${formatScalar(item)}`);
-        }
-      }
+      appendList(lines, key, value);
+    } else if (isPlainObject(value)) {
+      appendMapping(lines, key, value);
     } else {
       lines.push(`${key}: ${formatScalar(value)}`);
     }
@@ -52,6 +37,45 @@ export function replaceFrontmatter(markdown, data) {
   }
 
   return `${stringifyFrontmatter(data)}${markdown.slice(match[0].length)}`;
+}
+
+function appendList(lines, key, value) {
+  if (value.length === 0) {
+    lines.push(`${key}: []`);
+    return;
+  }
+
+  lines.push(`${key}:`);
+  for (const item of value) {
+    if (isPlainObject(item)) {
+      const entries = Object.entries(item);
+      const [firstKey, firstValue] = entries[0];
+      lines.push(`  - ${firstKey}: ${formatScalar(firstValue)}`);
+      for (const [childKey, childValue] of entries.slice(1)) {
+        lines.push(`    ${childKey}: ${formatScalar(childValue)}`);
+      }
+    } else {
+      lines.push(`  - ${formatScalar(item)}`);
+    }
+  }
+}
+
+// Nested block mappings hold small fixed groups such as `story-time`. Collections
+// stay list-of-objects so the v2 shape keeps round-tripping unchanged.
+function appendMapping(lines, key, value) {
+  const entries = Object.entries(value);
+  if (entries.length === 0) {
+    lines.push(`${key}: {}`);
+    return;
+  }
+
+  lines.push(`${key}:`);
+  for (const [childKey, childValue] of entries) {
+    if (Array.isArray(childValue) || isPlainObject(childValue)) {
+      throw new Error(`Frontmatter mapping ${key}.${childKey} must be a scalar`);
+    }
+    lines.push(`  ${childKey}: ${formatScalar(childValue)}`);
+  }
 }
 
 function parseYaml(source) {
@@ -77,18 +101,47 @@ function parseYaml(source) {
       continue;
     }
 
-    const parsed = parseArray(lines, index + 1);
-    if (parsed.nextIndex === index + 1) {
+    const block = parseBlock(lines, index + 1);
+    if (block.nextIndex === index + 1) {
       data[key] = "";
       index += 1;
       continue;
     }
 
-    data[key] = parsed.items;
-    index = parsed.nextIndex;
+    data[key] = block.value;
+    index = block.nextIndex;
   }
 
   return data;
+}
+
+// A `key:` header is followed by either list items (`  - ...`) or a nested
+// mapping (`  child: ...`). Anything else leaves the key as an empty scalar.
+function parseBlock(lines, startIndex) {
+  if (/^  -(?:\s|$)/.test(lines[startIndex] ?? "")) {
+    const parsed = parseArray(lines, startIndex);
+    return { value: parsed.items, nextIndex: parsed.nextIndex };
+  }
+
+  const parsed = parseMapping(lines, startIndex);
+  return { value: parsed.entries, nextIndex: parsed.nextIndex };
+}
+
+function parseMapping(lines, startIndex) {
+  const entries = {};
+  let index = startIndex;
+
+  while (index < lines.length) {
+    const childMatch = /^  ([A-Za-z0-9_-]+):(?:\s*(.*))?$/.exec(lines[index]);
+    if (!childMatch) {
+      break;
+    }
+
+    entries[childMatch[1]] = parseScalar(childMatch[2] ?? "");
+    index += 1;
+  }
+
+  return { entries, nextIndex: index };
 }
 
 function parseArray(lines, startIndex) {
@@ -137,6 +190,10 @@ function parseScalar(value) {
     return [];
   }
 
+  if (trimmed === "{}") {
+    return {};
+  }
+
   if (/^-?\d+$/.test(trimmed)) {
     return Number.parseInt(trimmed, 10);
   }
@@ -172,7 +229,7 @@ function formatScalar(value) {
   }
 
   const text = String(value);
-  if (text === "" || text === "[]" || /^-?\d+(\.\d+)?$/.test(text) || /^\s|\s$/.test(text) || /[:#\n"']/.test(text)) {
+  if (text === "" || text === "[]" || text === "{}" || /^-?\d+(\.\d+)?$/.test(text) || /^\s|\s$/.test(text) || /[:#\n"']/.test(text)) {
     return JSON.stringify(text);
   }
 

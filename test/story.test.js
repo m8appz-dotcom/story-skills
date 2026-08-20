@@ -462,6 +462,7 @@ role: supporting
       fs.readFileSync(path.join(created.root, "story.md"), "utf8")
         .replace("schema-version: 1", "schema-version: 99")
         .replace("schema-version: 2", "schema-version: 99")
+        .replace("schema-version: 3", "schema-version: 99")
         .replace("genre: fiction", "genre:\n  - fiction")
         .replace("themes:\n  - change", "themes: none")
         .replace("status: planning", "status: unknown-stage"),
@@ -635,7 +636,7 @@ word-count: 1
     fs.rmSync(path.join(created.root, "glossary"), { recursive: true, force: true });
     fs.writeFileSync(
       path.join(created.root, "story.md"),
-      fs.readFileSync(path.join(created.root, "story.md"), "utf8").replace("schema-version: 2", "schema-version: 1"),
+      fs.readFileSync(path.join(created.root, "story.md"), "utf8").replace("schema-version: 3", "schema-version: 2"),
       "utf8"
     );
     const migrated = migrateProject(created.root);

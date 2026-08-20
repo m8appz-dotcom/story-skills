@@ -29,6 +29,10 @@ A story project must already exist. Verify by checking for `story.md` in the pro
    - Matching scene files in `scenes/`
    - `continuity/state.md`, open questions, and promises/payoffs
    - `plot/timeline.md` and active arc files for continuity-sensitive edits
+   - On a `schema-version: 3` project, also: `story state . --chapter <id>` for
+     the accepted snapshot, `story knowledge . --character <id>` for what each
+     character holds, and `story transaction . --chapter <id>` for what was
+     actually committed when the chapter was accepted
 3. Create a concise revision plan:
    - What will change
    - What must stay fixed for continuity
@@ -57,11 +61,49 @@ story doctor .
 
 If `story` is not installed, use `bun run story --` from this repository or the bundled `story-maintenance/scripts/story.js` fallback when available.
 
+## Revising Accepted Chapters (schema v3)
+
+An accepted chapter is bound to a transaction that stores a hash of its prose.
+Editing that prose is allowed -- the author is always the final authority -- but
+it makes canon and its recorded state disagree, and `story continuity` will say
+so:
+
+```text
+transactions/chapter-07.json body-sha256 does not match chapters/chapter-07.md
+```
+
+This is a signal, not a failure to suppress. When it appears:
+
+1. Confirm the edit was intentional. If not, revert the prose.
+2. If it was intentional, check whether the edit changed any *state*: what a
+   character now knows, where they are, who holds what, which promise fired.
+3. Update the affected records: the chapter snapshot in `continuity/state/`,
+   knowledge records, promises, questions, timeline.
+4. Report the hash mismatch to the user with what you reconciled.
+
+Never rewrite a transaction to make the hash match. The transaction records what
+was accepted; changing it to match a later edit destroys the only evidence that
+canon moved.
+
+**Never edit an earlier state snapshot.** Snapshots are append-only. If chapter 3
+state was wrong, that is a fact about the draft, and correcting it means
+deciding deliberately how far forward the correction propagates.
+
+Candidates in `work/` are not canon. Do not audit them for continuity unless the
+user is asking for pre-acceptance review, and never "fix" canon to match a
+candidate.
+
 ## Continuity Audit Checklist
 
-Run `story continuity .` first to collect the deterministic findings, then check for what the CLI cannot judge:
+Run `story continuity .` first to collect the deterministic findings, then check
+for what the CLI cannot judge. Keep the boundary explicit: the CLI proves that
+references resolve and orderings hold. Everything below requires reading for
+meaning, and no CLI result should be reported as covering it.
 
-- Character knowledge: no one acts on information they have not learned
+- Character knowledge: no one acts on information they have not learned. On a v3
+  project, `story context . --chapter <id> --pov <id>` shows exactly what that
+  character could hold in that chapter; anything the prose leans on that is
+  absent from the projection is a leak
 - Character state: injuries, emotions, alliances, location, and status carry forward
 - Timeline: time of day, travel time, sequence, and cause/effect stay coherent
 - Plot arcs: each changed scene still advances or intentionally pauses an arc
@@ -71,6 +113,27 @@ Run `story continuity .` first to collect the deterministic findings, then check
 - World rules: magic, technology, politics, and geography stay consistent with worldbuilding files
 - References: chapter frontmatter lists every major character, location, and arc advanced in the prose
 - Registries: indexes, word counts, and links are current after edits
+
+## Prose Signals
+
+For a line edit or polish pass, `story prose .` locates mechanical tics that are
+tedious to spot by eye:
+
+```shell
+story prose .
+story prose . --chapter chapter-07
+```
+
+It reports repeated phrases, runs of sentences opening with the same word, runs
+of near-identical sentence length, runs of identical paragraph shape, chapters
+ending alike, and aggregate dialogue statistics.
+
+Treat every finding as a question, never as a defect. Repetition is often
+deliberate: a refrain, a character tic, an intentional echo. The command never
+fails and never gates anything.
+
+It does not judge cliche, over-explanation, abstraction, or whether two
+characters sound alike. Those need reading, and they stay in the checklist above.
 
 ## Reporting
 

@@ -1,0 +1,41 @@
+{
+  "pages": [
+    { "id": "page-1", "name": "B — Build-out" },
+    { "id": "page-2", "name": "Directions" }
+  ],
+  "artboards": [
+    { "file": "Projects.dc.html", "title": "1 — Projects", "page": "page-1", "x": 0, "y": 0, "w": 1100, "h": 800 },
+    { "file": "NewProject.dc.html", "title": "2 — New project", "page": "page-1", "x": 1180, "y": 0, "w": 1100, "h": 800 },
+    { "file": "Status.dc.html", "title": "3 — Status", "page": "page-1", "x": 2360, "y": 0, "w": 1100, "h": 800 },
+    { "file": "Roles.dc.html", "title": "4 — Roles", "page": "page-1", "x": 3540, "y": 0, "w": 1240, "h": 800 },
+    { "file": "ControlRoom.dc.html", "title": "B — Control Room (chosen)", "page": "page-1", "x": 4860, "y": 0, "w": 1100, "h": 800 },
+
+    { "file": "Main.dc.html", "title": "A — Writing Desk", "page": "page-2", "x": 0, "y": 0, "w": 1100, "h": 800 },
+    { "file": "ReadingRoom.dc.html", "title": "C — Reading Room", "page": "page-2", "x": 1180, "y": 0, "w": 1100, "h": 800 }
+  ],
+  "annotations": [
+    {
+      "id": "buildout-note",
+      "x": 0,
+      "y": -215,
+      "w": 820,
+      "text": "B, built out.\n\nProjects → New project → Status → Roles, then the Control Room desk you picked.\nSame palette and type as B; the wireframe hand-notes are gone now the direction is settled.\n\nRoles is the one screen that describes something the engine does not have yet."
+    },
+    {
+      "id": "roles-warning",
+      "x": 3540,
+      "y": -215,
+      "w": 420,
+      "text": "Feature 11 of the original brief — the one I told you I skipped.\n\nThe interesting column is not Model. It is 'what it can read': the drafter is bounded by the engine, the continuity reviewer deliberately is not."
+    },
+    {
+      "id": "directions-note",
+      "x": 0,
+      "y": -215,
+      "w": 520,
+      "page": "page-2",
+      "text": "The two directions not taken, kept for the record."
+    }
+  ],
+  "launch": { "view": "canvas", "page": "page-1" }
+}

@@ -83,7 +83,7 @@ describe("cli", () => {
     expect(invoke(cwd, ["links", root]).out).toContain("Links are valid");
     const report = invoke(cwd, ["report", root]);
     expect(report.out).toContain("# CLI Story");
-    expect(report.out).toContain("Schema version: 2");
+    expect(report.out).toContain("Schema version: 3");
     expect(report.out).toContain("- Total words: 2");
     expect(invoke(cwd, ["report", root, "--actionable"]).out).toContain("Next Actions:");
     expect(invoke(cwd, ["next", root]).out).toContain("Draft chapter 2");
@@ -149,7 +149,7 @@ word-count: 0
     fs.rmSync(path.join(root, "scenes"), { recursive: true, force: true });
     fs.writeFileSync(
       path.join(root, "story.md"),
-      fs.readFileSync(path.join(root, "story.md"), "utf8").replace("schema-version: 2", "schema-version: 1"),
+      fs.readFileSync(path.join(root, "story.md"), "utf8").replace("schema-version: 3", "schema-version: 2"),
       "utf8"
     );
     const migrated = invoke(cwd, ["migrate", root]);

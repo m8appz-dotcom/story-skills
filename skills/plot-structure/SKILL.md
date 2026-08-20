@@ -40,6 +40,121 @@ A story project must already exist (created via the story-init skill). Verify by
 10. If characters are referenced, verify they exist in `characters/`
 11. When CLI access is available, run `story reindex .`, `story links .`, and `story validate .`
 
+## Arc Plans (schema v3)
+
+On a `schema-version: 3` project an arc carries a plan spanning roughly 3-8
+chapters. The plan is where the arc's obligations live, and it separates three
+kinds of statement that must not be collapsed into one list:
+
+```yaml
+chapters: [chapter-05, chapter-06, chapter-07, chapter-08]
+dramatic-objective: Sarah moves from grief to suspicion
+starting-state: Sarah trusts her uncle completely
+target-end-state: Sarah has begun counting his lies
+
+hard-constraints:
+  - constraint: Sarah must not learn the truth about Elizabeth yet
+    kind: knowledge          # knowledge | possession | location | reveal | survival | other
+    character: sarah
+    fact: robert-drowned-elizabeth
+    until: chapter-08
+
+required-setups: []
+required-payoffs: []
+soft-possibilities:
+  - Robert could offer to handle the paperwork himself
+```
+
+- **hard-constraints** must not be violated. Give them a `kind` and, where the
+  constraint is about a specific entity, a `character`, `fact`, or `artifact`, so
+  the CLI can check the references and the render packet can enforce them.
+- **required-setups / required-payoffs** are what this arc owes the reader.
+  Expected outcomes, but the implementation may vary.
+- **soft-possibilities** are available to the prose model and never mandatory.
+
+Do not convert every intention into a hard constraint. An arc where everything
+is mandatory leaves no room for character behaviour to emerge, which is the main
+thing long drafts need room for. If a beat is genuinely optional, it belongs in
+`soft-possibilities` or in a scene's `soft-beats`.
+
+`until` normally names a chapter that does not exist yet -- "must not be revealed
+before chapter 25" is written long before chapter 25 does. That is expected and
+reported as a warning, not an error.
+
+### Simulating the arc
+
+Before drafting the arc's chapters, simulate it. This is the intermediate layer
+that stops the workflow from collapsing into plan-chapter, write-chapter,
+plan-next-chapter.
+
+```shell
+story simulate-arc . --arc the-drowning
+```
+
+The brief gives you, per character: their goal, pressure, resources, interior
+fields, and -- the part not to guess -- exactly what they know at the arc's
+opening, taken from the epistemic graph. Two characters in the same arc get
+genuinely different pictures.
+
+Use it to reason about what each character does across the arc, **including
+offscreen**. An antagonist keeps acting while the POV is elsewhere; if the plan
+only covers what the reader sees, the antagonist becomes reactive scenery.
+
+Record the result on the arc:
+
+```yaml
+arc-characters:
+  - id: robert
+    goal: keep the inquest closed
+    pressure: the surveyor is asking about the rope
+    resources: the harbor office and his brother's silence
+    likely-actions: move the ledger before the audit
+    offscreen-actions: visits the boatyard between chapter-02 and chapter-03
+
+causal-chain:
+  - step: 1
+    chapter: chapter-05
+    character: sarah
+    cause: Sarah finds the second rope coiled wrong
+    effect: she starts noticing what her uncle is careful about
+  - step: 2
+    chapter: chapter-06
+    character: sarah
+    cause: she reads the moved ledger
+    effect: she understands what he did
+    learns: robert-drowned-elizabeth
+```
+
+Name the fact in `learns` whenever a step makes someone learn something
+canonical. `story continuity` then checks the chain against the arc's hard
+constraints and reports a step that has a character learn something too early:
+
+```text
+causal-chain[2] has sarah learn robert-drowned-elizabeth in chapter-06,
+but a hard constraint withholds it until chapter-08
+```
+
+Catching that in the plan is the entire point. The alternative is discovering it
+three chapters into the prose.
+
+The chain is causal reasoning, not a beat sheet. Keep it at the level of "this
+causes that", and leave the drafting room to find better local action.
+
+### Sealing an arc plan
+
+Once the user approves the plan, freeze it:
+
+```shell
+story seal-arc . --arc the-drowning
+```
+
+This writes `plot/arcs/sealed/the-drowning-v1.md` and stamps the arc with
+`plan-version` and `sealed-version`. Sealed plans are never edited in place:
+change the arc and seal again to produce v2. Earlier versions stay byte-identical,
+so every chapter plan can name the exact arc version it derives from.
+
+Reseal whenever the plan changes materially. Do not edit a sealed file.
+
 ## Managing Plot Points
 
 Plot points live within arc files in the "Plot Points" table. When adding a plot point:

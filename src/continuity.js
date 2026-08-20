@@ -1,6 +1,10 @@
 import path from "node:path";
 
-const CHEKHOV_CHAPTER_GAP = 3;
+const DEFAULT_CHEKHOV_CHAPTER_GAP = 3;
+
+// Chapter-shaped fields may name this instead of a chapter id for anything true
+// before chapter one opens. Shared with the v3 epistemic graph.
+const PRE_STORY = "pre-story";
 
 export function checkContinuity(project) {
   const errors = [];
@@ -11,7 +15,12 @@ export function checkContinuity(project) {
     locations: new Set(project.locations.map((location) => location.id)),
     artifacts: new Map(project.artifacts.map((artifact) => [artifact.id, artifact])),
     factions: new Set(project.factions.map((faction) => faction.id)),
-    latestChapter: project.chapters.reduce((max, chapter) => Math.max(max, chapter.number), 0)
+    latestChapter: project.chapters.reduce((max, chapter) => Math.max(max, chapter.number), 0),
+    // Tuned for short work by default. A novel sets `chekhov-gap` in story.md,
+    // because a setup planted in chapter one and paid in chapter thirty is the
+    // form working, not a fault, and a checker that cries every chapter trains
+    // the author to stop reading warnings.
+    chekhovGap: Number(project.story.data["chekhov-gap"] ?? DEFAULT_CHEKHOV_CHAPTER_GAP)
   };
 
   checkCharacterDeaths(project, context, errors);
@@ -127,7 +136,7 @@ function checkPromises(project, context, errors, warnings) {
       warnings.push(`${label} records planted chapter ${promise.planted} but status is still planned`);
     }
 
-    if (promise.status === "planted" && plantedNumber !== undefined && context.latestChapter - plantedNumber >= CHEKHOV_CHAPTER_GAP) {
+    if (promise.status === "planted" && plantedNumber !== undefined && context.latestChapter - plantedNumber >= context.chekhovGap) {
       warnings.push(`${label} was planted in ${promise.planted}, ${context.latestChapter - plantedNumber} chapters ago, and has no payoff yet`);
     }
   }
@@ -212,7 +221,7 @@ function checkContinuityState(project, context, errors, warnings) {
     if (!entry.knows) {
       errors.push(`${entryLabel} is missing knows`);
     }
-    if (entry["learned-in"] && !context.chapterNumbers.has(entry["learned-in"])) {
+    if (entry["learned-in"] && entry["learned-in"] !== PRE_STORY && !context.chapterNumbers.has(entry["learned-in"])) {
       errors.push(`${entryLabel} references missing chapter ${entry["learned-in"]}`);
     }
   }
