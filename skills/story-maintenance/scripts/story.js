@@ -2014,7 +2014,7 @@ function buildSnapshot(project, candidate, previous) {
   return stateSnapshot(project.storyId, {
     chapter: candidate.chapter,
     sequence: candidate.number,
-    storyTime: Object.keys(candidate.storyTime).length > 0 ? candidate.storyTime : previous ? previous.storyTime : {},
+    storyTime: hasContent(candidate.storyTime) ? candidate.storyTime : previous ? previous.storyTime : {},
     characters: mergeById(previous ? previous.characters : [], candidate.stateCharacters),
     objects: mergeById(previous ? previous.objects : [], candidate.stateObjects),
     relationships: mergeById(previous ? previous.relationships : [], candidate.stateRelationships),
@@ -2022,6 +2022,9 @@ function buildSnapshot(project, candidate, previous) {
     readerKnowledge: candidate.readerKnowledge.length > 0 ? candidate.readerKnowledge : previous ? previous.readerKnowledge : [],
     note: `Durable state after ${candidate.chapter}.`
   });
+}
+function hasContent(mapping) {
+  return Object.values(mapping ?? {}).some((value) => String(value ?? "").trim() !== "");
 }
 function mergeById(previous, delta) {
   const merged = new Map;

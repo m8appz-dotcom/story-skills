@@ -13,18 +13,30 @@ let current = null;
 
 for (const line of fs.readFileSync(lcovPath, "utf8").split(/\r?\n/)) {
   if (line.startsWith("SF:")) {
-    current = { file: line.slice(3), lines: [], functions: [] };
+    current = { file: line.slice(3), lines: [], functions: [], declared: new Map(), hit: new Set() };
   } else if (line.startsWith("DA:") && current) {
     const [number, hits] = line.slice(3).split(",");
     if (hits === "0") {
       current.lines.push(Number(number));
     }
+  } else if (line.startsWith("FN:") && current) {
+    // FN:<line>,<name> declares a function; FNDA:<hits>,<name> records calls.
+    const [number, ...rest] = line.slice(3).split(",");
+    current.declared.set(rest.join(","), Number(number));
   } else if (line.startsWith("FNDA:") && current) {
-    const [hits, name] = line.slice(5).split(",");
+    const [hits, ...rest] = line.slice(5).split(",");
+    const name = rest.join(",");
     if (hits === "0") {
       current.functions.push(name);
+    } else {
+      current.hit.add(name);
     }
   } else if (line === "end_of_record" && current) {
+    for (const [name, number] of current.declared) {
+      if (!current.hit.has(name) && !current.functions.includes(name)) {
+        current.functions.push(`${name} (line ${number})`);
+      }
+    }
     records.set(current.file, current);
     current = null;
   }

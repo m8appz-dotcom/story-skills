@@ -273,7 +273,10 @@ function buildSnapshot(project, candidate, previous) {
   return stateSnapshot(project.storyId, {
     chapter: candidate.chapter,
     sequence: candidate.number,
-    storyTime: Object.keys(candidate.storyTime).length > 0
+    // The scaffold writes story-time with its three keys already present and
+    // empty, so counting keys would always look like "the chapter set this" and
+    // silently wipe the clock. What matters is whether any of them says anything.
+    storyTime: hasContent(candidate.storyTime)
       ? candidate.storyTime
       : (previous ? previous.storyTime : {}),
     characters: mergeById(previous ? previous.characters : [], candidate.stateCharacters),
@@ -287,6 +290,10 @@ function buildSnapshot(project, candidate, previous) {
       : (previous ? previous.readerKnowledge : []),
     note: `Durable state after ${candidate.chapter}.`
   });
+}
+
+function hasContent(mapping) {
+  return Object.values(mapping ?? {}).some((value) => String(value ?? "").trim() !== "");
 }
 
 function mergeById(previous, delta) {

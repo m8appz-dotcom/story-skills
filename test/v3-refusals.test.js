@@ -190,6 +190,8 @@ describe("relationship leftovers", () => {
     const root = project("Relationship Leftovers");
     createEntity(root, { kind: "character", name: "Sarah", role: "protagonist" });
     createEntity(root, { kind: "character", name: "Robert", role: "antagonist" });
+    // A chapter must exist, or the lookup for last-major-change never runs.
+    createEntity(root, { kind: "chapter", name: "One", number: 1 });
 
     writeMarkdown(path.join(root, "continuity", "relationships", "sarah.md"), [
       "type: relationship", "id: sarah", "participants:", "  - sarah"
