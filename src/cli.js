@@ -215,13 +215,13 @@ export function runCli(argv, io) {
     }
 
     if (command === "know") {
-      const result = recordKnowledge(targetRoot(cwd, parsed), parsed.options);
+      const result = recordKnowledge(root, parsed.options);
       io.stdout.write(`Recorded ${result.character} ${result.status} ${result.fact}\n`);
       return 0;
     }
 
     if (command === "candidate") {
-      const result = createCandidate(targetRoot(cwd, parsed), parsed.options);
+      const result = createCandidate(root, parsed.options);
       io.stdout.write(`Created ${result.candidate} for ${result.chapter}: ${result.file}` + "\n");
       return 0;
     }
@@ -239,13 +239,13 @@ export function runCli(argv, io) {
     }
 
     if (command === "accept") {
-      const result = acceptCandidate(targetRoot(cwd, parsed), parsed.options);
+      const result = acceptCandidate(root, parsed.options);
       io.stdout.write(`Accepted ${result.candidate} as ${result.chapter} (${result.stateBefore} -> ${result.stateAfter}, body ${result.bodyHash.slice(0, 12)})` + "\n");
       return 0;
     }
 
     if (command === "reject") {
-      const result = rejectCandidate(targetRoot(cwd, parsed), parsed.options);
+      const result = rejectCandidate(root, parsed.options);
       io.stdout.write(`Rejected ${result.candidate} for ${result.chapter}; canon unchanged` + "\n");
       return 0;
     }
@@ -288,7 +288,7 @@ export function runCli(argv, io) {
     }
 
     if (command === "seal-arc") {
-      const result = sealArc(targetRoot(cwd, parsed), parsed.options);
+      const result = sealArc(root, parsed.options);
       io.stdout.write(`Sealed ${result.arc} as ${result.id} (version ${result.version})` + "\n");
       return 0;
     }
