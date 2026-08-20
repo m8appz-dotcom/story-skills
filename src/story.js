@@ -1444,7 +1444,13 @@ export function formatKnowledgeReport(report) {
 
 // Phase B of the two-phase update. Every target is captured first, so a failure
 // part-way through restores the repository to exactly its previous state.
-function commitWrites(root, writes) {
+//
+// Exported because that guarantee cannot be reached through the public API:
+// scanProject validates the tree and the capture pass reads every existing
+// target, so a malformed project is refused before the first write. Only a real
+// runtime fault -- a full disk, permissions changing under us -- fails mid-way,
+// and the only way to prove the recovery is to drive this directly.
+export function commitWrites(root, writes) {
   const originals = writes.map((write) => ({
     file: write.file,
     existed: fs.existsSync(write.file),

@@ -392,13 +392,10 @@ function buildRecordWrites(project, candidate, kind) {
   const records = kind === "promise" ? project.promises : project.questions;
   const writes = [];
 
+  // Every id here resolved during Phase A, which refuses an unknown promise or
+  // question against this same scan, so the lookup cannot come back empty.
   for (const entry of delta) {
-    const id = entry[kind];
-    const record = records.find((item) => item.id === id);
-    if (!record) {
-      continue;
-    }
-
+    const record = records.find((item) => item.id === entry[kind]);
     const next = { ...record.rawData };
     if (entry.status) {
       next.status = entry.status;

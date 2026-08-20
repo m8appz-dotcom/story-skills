@@ -572,16 +572,10 @@ function checkEpistemicGraph(project) {
   return { ok: errors.length === 0, errors, warnings };
 }
 function checkFacts(project, errors, warnings) {
-  const seen = new Map;
   for (const fact of project.facts) {
     const label = relative2(project, fact.file);
     if (fact.declaredId && fact.declaredId !== fact.id) {
       errors.push(`${label} declares id ${fact.declaredId} but the filename is ${fact.id}`);
-    }
-    if (seen.has(fact.id)) {
-      errors.push(`${label} duplicates fact id ${fact.id} already defined in ${relative2(project, seen.get(fact.id))}`);
-    } else {
-      seen.set(fact.id, fact.file);
     }
     if (!fact.statement) {
       errors.push(`${label} is missing statement`);
@@ -637,7 +631,7 @@ function checkKnowledge(project, errors, warnings) {
       }
       const learned = chapterPosition(project, entry["learned-in"], entryLabel, "learned-in", errors);
       if (learned !== null && currentPosition !== null && learned > currentPosition) {
-        errors.push(`${entryLabel} is learned-in ${entry["learned-in"]}, which is ahead of the current accepted state ${describePosition(project, currentPosition)}`);
+        errors.push(`${entryLabel} is learned-in ${entry["learned-in"]}, which is ahead of the current accepted state ${currentStateLabel(project)}`);
       }
       if (entry.status === "unknown" && entry["learned-in"]) {
         errors.push(`${entryLabel} is status unknown but records learned-in ${entry["learned-in"]}`);
@@ -672,12 +666,9 @@ function currentStatePosition(project) {
   const latest = project.stateSnapshots[project.stateSnapshots.length - 1];
   return chapterPosition(project, latest.chapter, "", "", null) ?? 0;
 }
-function describePosition(project, position) {
-  if (position === 0) {
-    return PRE_STORY2;
-  }
-  const chapter = project.chapters.find((item) => item.number === position);
-  return chapter ? chapter.id : `chapter ${position}`;
+function currentStateLabel(project) {
+  const latest = project.stateSnapshots[project.stateSnapshots.length - 1];
+  return latest && latest.chapter ? latest.chapter : PRE_STORY2;
 }
 function relative2(project, file) {
   return path3.relative(project.root, file);
@@ -2098,11 +2089,7 @@ function buildRecordWrites(project, candidate, kind) {
   const records = kind === "promise" ? project.promises : project.questions;
   const writes = [];
   for (const entry of delta) {
-    const id = entry[kind];
-    const record = records.find((item) => item.id === id);
-    if (!record) {
-      continue;
-    }
+    const record = records.find((item) => item.id === entry[kind]);
     const next = { ...record.rawData };
     if (entry.status) {
       next.status = entry.status;

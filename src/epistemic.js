@@ -27,19 +27,14 @@ export function checkEpistemicGraph(project) {
 }
 
 function checkFacts(project, errors, warnings) {
-  const seen = new Map();
-
   for (const fact of project.facts) {
     const label = relative(project, fact.file);
 
+    // A fact's id is its filename, so two facts cannot collide on it. Two files
+    // declaring the same `id:` field are caught here instead: at most one of
+    // them can match its own filename.
     if (fact.declaredId && fact.declaredId !== fact.id) {
       errors.push(`${label} declares id ${fact.declaredId} but the filename is ${fact.id}`);
-    }
-
-    if (seen.has(fact.id)) {
-      errors.push(`${label} duplicates fact id ${fact.id} already defined in ${relative(project, seen.get(fact.id))}`);
-    } else {
-      seen.set(fact.id, fact.file);
     }
 
     if (!fact.statement) {
@@ -115,7 +110,7 @@ function checkKnowledge(project, errors, warnings) {
       const learned = chapterPosition(project, entry["learned-in"], entryLabel, "learned-in", errors);
 
       if (learned !== null && currentPosition !== null && learned > currentPosition) {
-        errors.push(`${entryLabel} is learned-in ${entry["learned-in"]}, which is ahead of the current accepted state ${describePosition(project, currentPosition)}`);
+        errors.push(`${entryLabel} is learned-in ${entry["learned-in"]}, which is ahead of the current accepted state ${currentStateLabel(project)}`);
       }
 
       if (entry.status === "unknown" && entry["learned-in"]) {
@@ -163,12 +158,11 @@ export function currentStatePosition(project) {
   return chapterPosition(project, latest.chapter, "", "", null) ?? 0;
 }
 
-function describePosition(project, position) {
-  if (position === 0) {
-    return PRE_STORY;
-  }
-  const chapter = project.chapters.find((item) => item.number === position);
-  return chapter ? chapter.id : `chapter ${position}`;
+// What to call the accepted state in a message: the chapter the latest snapshot
+// names, or the pre-story sentinel when it names none.
+function currentStateLabel(project) {
+  const latest = project.stateSnapshots[project.stateSnapshots.length - 1];
+  return latest && latest.chapter ? latest.chapter : PRE_STORY;
 }
 
 function relative(project, file) {

@@ -289,20 +289,42 @@ describe("acceptance refusals", () => {
       .toThrow("sarah cannot learn robert-killed-elizabeth in chapter-04 while accepting chapter-01");
   });
 
-  test("a failed commit leaves canon and state unchanged", () => {
+  test("a failed commit rolls back the writes it had already made", () => {
     const root = seedStory("Atomic Rollback");
     authorCandidate(root, { data: fullDelta() });
 
-    // Block the transaction write so the commit fails after canon has been staged.
-    fs.mkdirSync(path.join(root, "transactions", "chapter-01.json"), { recursive: true });
+    // A *file* where the transactions directory belongs. The capture pass sees
+    // no transaction to preserve, so it succeeds; the write pass then fails
+    // trying to create the directory, by which point canon and the snapshot are
+    // already on disk. That is the only way to reach the rollback: a failure
+    // partway through the writes, not before them.
+    const blocker = path.join(root, "transactions");
+    fs.writeFileSync(blocker, "not a directory", "utf8");
 
     expect(() => acceptCandidate(root, { chapter: "chapter-01", candidate: "candidate-001" })).toThrow();
 
-    // Everything written before the failure is rolled back.
+    // Clear the obstruction so the project is scannable again; the rollback has
+    // already happened by now.
+    fs.rmSync(blocker);
+
+    // Everything written before the failure is gone again.
     expect(fs.existsSync(path.join(root, "chapters", "chapter-01.md"))).toBe(false);
     expect(fs.existsSync(path.join(root, "continuity", "state", "chapter-01.md"))).toBe(false);
     expect(stateReport(root).snapshot.id).toBe("chapter-00");
     expect(knowledgeReport(root, { character: "sarah" }).records[0].facts[0].status).toBe("unknown");
+  });
+
+  test("a commit that fails before writing anything mutates nothing either", () => {
+    const root = seedStory("Nothing Staged");
+    authorCandidate(root, { data: fullDelta() });
+
+    // A directory where the transaction file belongs: the capture pass cannot
+    // read it, so the commit gives up before the first write.
+    fs.mkdirSync(path.join(root, "transactions", "chapter-01.json"), { recursive: true });
+
+    expect(() => acceptCandidate(root, { chapter: "chapter-01", candidate: "candidate-001" })).toThrow();
+    expect(fs.existsSync(path.join(root, "chapters", "chapter-01.md"))).toBe(false);
+    expect(stateReport(root).snapshot.id).toBe("chapter-00");
   });
 });
 
