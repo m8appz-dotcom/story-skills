@@ -172,16 +172,31 @@ export function createServer({ token, registryDir = HERE }) {
         // cannot carry the token header.
         response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8" });
 
-        for await (const event of runDraft({
-          root,
-          chapter: String(body.chapter ?? ""),
-          pov: String(body.pov ?? ""),
-          harness: String(body.harness ?? "")
-        })) {
-          response.write(`${JSON.stringify(event)}\n`);
-        }
+        try {
+          for await (const event of runDraft({
+            root,
+            chapter: String(body.chapter ?? ""),
+            pov: String(body.pov ?? ""),
+            harness: String(body.harness ?? "")
+          })) {
+            response.write(`${JSON.stringify(event)}\n`);
+          }
 
-        response.end();
+          response.end();
+        } catch (error) {
+          // A stream-level failure -- e.g. child.stdout itself erroring,
+          // distinct from a spawn error runDraft already turns into a normal
+          // {type: "error"} event -- would otherwise reject this async
+          // callback with nothing attached to catch it, which can crash a
+          // long-running local server. The 200/ndjson header is already
+          // committed by this point, so there is no status left to change;
+          // report what we still can and close the stream either way.
+          if (!response.headersSent) {
+            sendJson(response, 500, { error: error.message });
+          } else {
+            response.end();
+          }
+        }
       });
       return;
     }

@@ -62,18 +62,35 @@ export async function* runDraft({ root, chapter, pov, harness, spawnImpl = nodeS
   let prose = "";
   let carry = "";
 
+  // Both a complete line inside the loop and the leftover fragment flushed
+  // after it (below) must extract text the same way, or they would drift
+  // into two implementations of the same rule.
+  function consumeLine(line) {
+    const text = extractText(harness, line);
+    if (text === "") return null;
+    prose += text;
+    return { type: "chunk", text };
+  }
+
   for await (const data of child.stdout) {
     carry += data;
     const lines = carry.split("\n");
     carry = lines.pop() ?? "";
 
     for (const line of lines) {
-      const text = extractText(harness, line);
-      if (text !== "") {
-        prose += text;
-        yield { type: "chunk", text };
-      }
+      const event = consumeLine(line);
+      if (event) yield event;
     }
+  }
+
+  // A harness that ends its final write without a trailing newline leaves a
+  // complete line sitting unprocessed in `carry` -- e.g. the end of the
+  // model's last sentence. Without this flush that text vanishes from both
+  // the stream and the candidate file while `{type: "done"}` still reports
+  // success.
+  if (carry !== "") {
+    const event = consumeLine(carry);
+    if (event) yield event;
   }
 
   const code = await exit;

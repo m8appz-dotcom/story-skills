@@ -227,15 +227,54 @@ import { runDraft } from "../ui/draft.js";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import fsNode from "node:fs";
-import pathNode from "node:path";
 
-function stubSpawn(lines, { code = 0, stderr = [] } = {}) {
+function stubSpawn(lines, { code = 0, stderr = [], finalNewline = true } = {}) {
   return () => {
     const child = new EventEmitter();
-    child.stdout = Readable.from(lines.map((line) => `${JSON.stringify(line)}\n`));
+    const chunks = lines.map((line) => `${JSON.stringify(line)}\n`);
+    // Real harnesses do not guarantee a trailing newline on their last write.
+    // Tests that need to prove the leftover-buffer flush (draft.js's `carry`)
+    // opt out of the newline this stub otherwise appends to every line.
+    if (!finalNewline && chunks.length > 0) {
+      chunks[chunks.length - 1] = chunks[chunks.length - 1].replace(/\n$/, "");
+    }
+    child.stdout = Readable.from(chunks);
     child.stderr = Readable.from(stderr);
     child.stdin = new Writable({ write(chunk, encoding, done) { done(); } });
     child.stdout.on("end", () => setImmediate(() => child.emit("close", code)));
+    return child;
+  };
+}
+
+// Unlike stubSpawn (always one chunk per JSON line), this hands stdout exactly
+// the chunk boundaries given -- proving draft.js's `carry` buffer reassembles
+// a line that a single `data` event split, instead of relying on stubSpawn's
+// line-aligned chunks to accidentally hide that gap.
+function stubSpawnChunks(chunks, { code = 0, stderr = [] } = {}) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = Readable.from(chunks);
+    child.stderr = Readable.from(stderr);
+    child.stdin = new Writable({ write(chunk, encoding, done) { done(); } });
+    child.stdout.on("end", () => setImmediate(() => child.emit("close", code)));
+    return child;
+  };
+}
+
+// Simulates the binary-not-on-PATH case: child_process fires "error" instead
+// of a normal exit. stdout/stderr still exist (Node creates the pipes before
+// the spawn itself can fail) but never produce data, and "close" still fires
+// so runDraft's `exit` promise settles instead of hanging forever.
+function stubSpawnError(message) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = Readable.from([]);
+    child.stderr = Readable.from([]);
+    child.stdin = new Writable({ write(chunk, encoding, done) { done(); } });
+    setImmediate(() => {
+      child.emit("error", new Error(message));
+      child.emit("close", 1);
+    });
     return child;
   };
 }
@@ -294,5 +333,88 @@ describe("drafting", () => {
     const events = await collect({ root, chapter: "chapter-01", pov: "", harness: "curl" });
     expect(events[0].type).toBe("error");
     expect(events[0].text).toContain("Unknown harness: curl");
+  });
+
+  test("flushes the final line even without a trailing newline, instead of dropping it", async () => {
+    const { root } = await seeded("Unterminated Draft", (dir) => {
+      createEntity(dir, { kind: "character", name: "Chimpu", role: "protagonist" });
+      createEntity(dir, { kind: "chapter", name: "One", number: 1, pov: "chimpu" });
+    });
+
+    const events = await collect({
+      root, chapter: "chapter-01", pov: "chimpu", harness: "codex",
+      spawnImpl: stubSpawn([
+        { type: "item", item: { type: "agent_message", text: "The light went out." } }
+      ], { finalNewline: false })
+    });
+
+    // Without the post-loop flush, this text lands in neither the stream nor
+    // the file, and {type: "done"} still reports success -- the bug itself.
+    const chunk = events.find((event) => event.type === "chunk");
+    expect(chunk?.text).toBe("The light went out.");
+
+    const done = events.find((event) => event.type === "done");
+    expect(done).toBeDefined();
+    expect(fsNode.readFileSync(done.candidateFile, "utf8")).toContain("The light went out.");
+  });
+
+  test("reassembles a JSON line split across two stdout chunks", async () => {
+    const { root } = await seeded("Split Chunk Draft", (dir) => {
+      createEntity(dir, { kind: "character", name: "Chimpu", role: "protagonist" });
+      createEntity(dir, { kind: "chapter", name: "One", number: 1, pov: "chimpu" });
+    });
+
+    const line = `${JSON.stringify({ type: "item", item: { type: "agent_message", text: "Split across chunks." } })}\n`;
+    const midpoint = Math.floor(line.length / 2);
+
+    const events = await collect({
+      root, chapter: "chapter-01", pov: "chimpu", harness: "codex",
+      // A real stdout `data` event boundary has no relationship to JSON line
+      // boundaries; every other stub in this file happens to align them.
+      spawnImpl: stubSpawnChunks([line.slice(0, midpoint), line.slice(midpoint)])
+    });
+
+    expect(events.find((event) => event.type === "chunk")?.text).toBe("Split across chunks.");
+  });
+
+  test("reports a missing binary as an error event, not an empty success", async () => {
+    const { root } = await seeded("Missing Binary", (dir) => {
+      createEntity(dir, { kind: "character", name: "Chimpu", role: "protagonist" });
+      createEntity(dir, { kind: "chapter", name: "One", number: 1, pov: "chimpu" });
+    });
+
+    const events = await collect({
+      root, chapter: "chapter-01", pov: "chimpu", harness: "codex",
+      spawnImpl: stubSpawnError("ENOENT")
+    });
+
+    // child.on("error") is the path a binary missing from PATH takes -- it
+    // must surface as a named failure, never as an empty draft reported done.
+    expect(events.some((event) => event.type === "done")).toBe(false);
+    const error = events.find((event) => event.type === "error");
+    expect(error).toBeDefined();
+    expect(error.text).toContain("codex could not be started");
+    expect(error.text).toContain("ENOENT");
+  });
+});
+
+describe("draft endpoint", () => {
+  test("streams ndjson and reports an unknown harness without launching a model", async () => {
+    const { id } = await seeded("Draft Route Novel", () => {});
+
+    const response = await post(`/api/project/${id}/draft`, { chapter: "chapter-01", pov: "", harness: "not-a-real-harness" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+
+    // buildSpawn rejects the harness before runDraft ever touches the
+    // project, so this exercises the route's own wiring -- regex, resolveRoot,
+    // ndjson framing -- without spawning anything.
+    const lines = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines[0].type).toBe("error");
+    expect(lines[0].text).toContain("Unknown harness: not-a-real-harness");
+  });
+
+  test("refuses an unregistered project id", async () => {
+    expect((await post("/api/project/deadbeef/draft", { chapter: "chapter-01", pov: "", harness: "codex" })).status).toBe(404);
   });
 });
