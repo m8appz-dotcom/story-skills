@@ -218,7 +218,11 @@ export function createServer({ token, registryDir = HERE }) {
             ? acceptCandidate(root, options)
             : rejectCandidate(root, options));
         } catch (error) {
-          // The engine refused. Acceptance is transactional, so nothing was written.
+          // The engine refused, and both actions validate fully before writing
+          // anything, so a refusal that lands here has touched nothing. Recovery
+          // from a failure part-way through the write pass is the transaction's
+          // own job and is covered in test/v3-commit.test.js, which drives
+          // commitWrites directly -- acceptance cannot reach that state.
           sendJson(response, 409, { error: error.message });
         }
       });
