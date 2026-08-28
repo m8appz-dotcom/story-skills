@@ -10,3 +10,16 @@ th { font: 500 11px/1 "IBM Plex Mono", ui-monospace, monospace; text-transform: 
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 tbody tr:hover { background: var(--raised); cursor: pointer; }
 .error { color: #a33; font-size: 13px; }
+.room { display: grid; grid-template-columns: minmax(0, 34rem) minmax(0, 22rem); gap: 2.5rem; align-items: start; }
+.prose h2 { font: 500 11px/1 "IBM Plex Mono", ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.prose #draft { white-space: pre-wrap; min-height: 12rem; border-left: 2px solid var(--rule); padding-left: 1rem; }
+.actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
+.actions #note { color: var(--muted); font-size: 13px; }
+.side { min-width: 0; }
+.knowledge { font: 13px/1.5 "IBM Plex Mono", ui-monospace, monospace; }
+.knowledge h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: .25rem; }
+.knowledge ul { list-style: none; padding: 0; margin: 0 0 1rem; }
+.knowledge li { padding: .15rem 0; }
+.knowledge .empty, .withheld, .confidence { color: var(--muted); }
+.constraint { border-left: 2px solid var(--rule); padding-left: .75rem; }
+@media (max-width: 60rem) { .room { grid-template-columns: 1fr; } }
