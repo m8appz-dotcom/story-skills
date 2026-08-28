@@ -18,6 +18,10 @@
 - Argv for a spawned harness is always fixed table content. Request data reaches a child only on stdin.
 - Every `/api/*` route requires the `X-Story-Token` header.
 - **No `innerHTML` anywhere in `ui/public/`.** Titles, fact statements, and prose all come out of project markdown, which is untrusted input to this page. The page holds a token that can spawn processes and write files, and it is reachable from the tailnet, so script injection here is privilege escalation rather than defacement. Build nodes and set `textContent`.
+- Registry access goes through the handler's `registryDir`, never the
+  module-level `HERE`. `createServer({token, registryDir = HERE})` makes it
+  injectable so tests cannot write into the developer's real registry; a route
+  that reaches for `HERE` silently reintroduces that.
 - All comments and identifiers in English, matching the repository.
 
 ## Measured facts
@@ -556,7 +560,7 @@ Replace the stub `/api/projects` block with:
     const detail = url.pathname.match(/^\/api\/project\/([a-f0-9]+)$/);
     if (detail && request.method === "GET") {
       try {
-        const root = resolveRoot(HERE, detail[1]);
+        const root = resolveRoot(registryDir, detail[1]);
         const report = projectReport(root);
         const validate = validateProject(root);
         const links = validateLinks(root);
@@ -667,7 +671,7 @@ Extend the engine import with `contextProjection`, then add:
     const context = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/context$/);
     if (context && request.method === "GET") {
       try {
-        const root = resolveRoot(HERE, context[1]);
+        const root = resolveRoot(registryDir, context[1]);
         sendJson(response, 200, contextProjection(root, {
           chapter: url.searchParams.get("chapter") ?? "",
           pov: url.searchParams.get("pov") ?? ""
@@ -796,7 +800,7 @@ Expected: FAIL — `Cannot find module '../ui/draft.js'`
 ```js
 import { spawn as nodeSpawn } from "node:child_process";
 import fs from "node:fs";
-import { createCandidate, renderPacket, scanProject } from "../src/story.js";
+import { createCandidate, renderPacket } from "../src/story.js";
 import { buildSpawn, extractText } from "./harness.js";
 
 // The packet is the entire brief. It goes on stdin because argv is not a safe
@@ -806,21 +810,26 @@ import { buildSpawn, extractText } from "./harness.js";
 const PROSE_HEADING = "## Chapter Text";
 
 export async function* runDraft({ root, chapter, pov, harness, spawnImpl = nodeSpawn }) {
-  let packet;
-  let file;
-
+  // The harness key is checked first, before anything is written. Building the
+  // packet first would both mask an unknown-harness error behind an engine one
+  // and leave an orphan candidate on disk for a request that can never run.
+  let command;
   try {
-    const built = renderPacket(scanProject(root), { chapter, pov });
-    packet = built.packet ?? built;
-    file = createCandidate(root, { chapter, title: chapter, pov }).file;
+    command = buildSpawn(harness);
   } catch (error) {
     yield { type: "error", text: error.message };
     return;
   }
 
-  let command;
+  let packet;
+  let file;
+
   try {
-    command = buildSpawn(harness);
+    // renderPacket scans the project itself and wants the root path, not a
+    // scanned project -- passing one throws a TypeError from path.join.
+    const built = renderPacket(root, { chapter, pov });
+    packet = built.packet ?? built;
+    file = createCandidate(root, { chapter, title: chapter, pov }).file;
   } catch (error) {
     yield { type: "error", text: error.message };
     return;
@@ -861,6 +870,15 @@ export async function* runDraft({ root, chapter, pov, harness, spawnImpl = nodeS
     }
   }
 
+  // Whatever is left in the buffer is real output: a harness whose final write
+  // carries no trailing newline would otherwise lose the end of the chapter
+  // silently, while still reporting a successful draft.
+  const tail = extractText(harness, carry);
+  if (tail !== "") {
+    prose += tail;
+    yield { type: "chunk", text: tail };
+  }
+
   const code = await exit;
 
   if (code !== 0) {
@@ -888,7 +906,7 @@ Import `runDraft` from `./draft.js`, then add:
       readBody(request).then(async (body) => {
         let root;
         try {
-          root = resolveRoot(HERE, draft[1]);
+          root = resolveRoot(registryDir, draft[1]);
         } catch (error) {
           sendJson(response, 404, { error: error.message });
           return;
@@ -972,7 +990,7 @@ Extend the engine import with `acceptCandidate` and `rejectCandidate`, then add:
       readBody(request).then((body) => {
         let root;
         try {
-          root = resolveRoot(HERE, decision[1]);
+          root = resolveRoot(registryDir, decision[1]);
         } catch (error) {
           sendJson(response, 404, { error: error.message });
           return;
