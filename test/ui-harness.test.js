@@ -24,11 +24,12 @@ describe("harness table", () => {
   });
 
   test("copies process.env instead of mutating it", () => {
-    // The shipped code spreads into a new object before deleting the guard
-    // keys ({ ...process.env }). A regression to deleting straight from
-    // process.env would still pass every other test in this file (they only
-    // ever inspect the returned env) while permanently stripping CLAUDECODE
-    // from the live server process, breaking the nested-launch guard for good.
+    // The shipped code builds a fresh allowlisted object rather than ever
+    // deleting keys from process.env itself. A regression to mutating
+    // process.env in place would still pass every other test in this file
+    // (they only ever inspect the returned env) while permanently stripping
+    // CLAUDECODE from the live server process, breaking the nested-launch
+    // guard for good.
     const hadClaudecode = Object.prototype.hasOwnProperty.call(process.env, "CLAUDECODE");
     const previousClaudecode = process.env.CLAUDECODE;
     process.env.CLAUDECODE = "1";
@@ -56,7 +57,10 @@ describe("harness table", () => {
     // lost its quoting -- exactly what shell:true makes dangerous, since argv
     // is concatenated unescaped (Node DEP0190). Pin the full argv, in order,
     // for every harness so a change to the table has to be deliberate.
-    expect(args).toEqual(["exec", "--json", "--skip-git-repo-check", `"${DRAFT_INSTRUCTION}"`]);
+    // codex's -s read-only is defence in depth for the packet-only guarantee
+    // (it still permits reads; the real defence is runDraft's empty cwd) --
+    // see ui/harness.js.
+    expect(args).toEqual(["exec", "--json", "--skip-git-repo-check", "-s", "read-only", `"${DRAFT_INSTRUCTION}"`]);
 
     const claudeSpawn = buildSpawn("claude");
     expect(claudeSpawn.command).toBe("claude");
@@ -70,7 +74,36 @@ describe("harness table", () => {
 
     const geminiSpawn = buildSpawn("gemini");
     expect(geminiSpawn.command).toBe("gemini");
-    expect(geminiSpawn.args).toEqual(["-p", `"${DRAFT_INSTRUCTION}"`, "--output-format", "stream-json"]);
+    // --approval-mode plan is the same defence in depth as codex's -s
+    // read-only above.
+    expect(geminiSpawn.args).toEqual([
+      "-p", `"${DRAFT_INSTRUCTION}"`,
+      "--output-format", "stream-json",
+      "--approval-mode", "plan"
+    ]);
+  });
+
+  test("hands the child a reduced environment, not a copy of the whole parent", () => {
+    // A stand-in for anything a real developer's environment might hold that
+    // has no business reaching a process whose only job is to read a JSON
+    // packet on stdin -- a cloud credential, an unrelated API key, an NPM
+    // token. If buildSpawn ever regresses to `{ ...process.env }`, this
+    // leaks straight through.
+    const hadMarker = Object.prototype.hasOwnProperty.call(process.env, "STORY_SKILLS_TEST_SECRET");
+    process.env.STORY_SKILLS_TEST_SECRET = "should-not-reach-the-child";
+
+    try {
+      const { env } = buildSpawn("claude");
+      expect("STORY_SKILLS_TEST_SECRET" in env).toBe(false);
+      // Not just that one marker: the whole point is an allowlist, so the
+      // child's environment must be meaningfully smaller than the parent's,
+      // not merely missing the one key this test happens to check.
+      expect(Object.keys(env).length).toBeLessThan(Object.keys(process.env).length);
+    } finally {
+      if (!hadMarker) {
+        delete process.env.STORY_SKILLS_TEST_SECRET;
+      }
+    }
   });
 
   test("pulls prose out of each harness's own line shape", () => {

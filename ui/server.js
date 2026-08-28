@@ -60,12 +60,19 @@ function sendStatic(response, urlPath) {
   response.end(fs.readFileSync(file));
 }
 
+// True for the loopback host names/addresses this server treats as
+// inherently local: reachable only from this machine, so a missing token is
+// not a way for anyone else to reach the API.
+function isLoopback(host) {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
 // registryDir defaults to HERE (this file's own directory), which keeps
 // production behaviour unchanged -- but it is a parameter, not a constant,
 // so tests can point it at a throwaway directory instead of reading and
 // writing the real projects.json a developer may have running locally.
 export function createServer({ token, registryDir = HERE }) {
-  return http.createServer((request, response) => {
+  const server = http.createServer((request, response) => {
     const url = new URL(request.url, "http://localhost");
 
     if (!url.pathname.startsWith("/api/")) {
@@ -104,6 +111,16 @@ export function createServer({ token, registryDir = HERE }) {
       try {
         const root = resolveRoot(registryDir, detail[1]);
         const report = projectReport(root);
+        // These three look redundant next to projectReport just above, which
+        // already computes its own validation/links/continuity internally --
+        // but they are not equivalent, so do not collapse them onto
+        // report.validation/report.links/report.continuity. In particular,
+        // report.continuity is checkContinuity() alone, while
+        // checkProjectContinuity() below merges seven checks (continuity,
+        // epistemic graph, relationships, state snapshots, transactions,
+        // arcs, causal chains). Reusing report.continuity here would quietly
+        // narrow what this endpoint -- and therefore the UI -- reports as
+        // "continuity" down to one of those seven checks.
         const validate = validateProject(root);
         const links = validateLinks(root);
         const continuity = checkProjectContinuity(root);
@@ -188,14 +205,33 @@ export function createServer({ token, registryDir = HERE }) {
           // distinct from a spawn error runDraft already turns into a normal
           // {type: "error"} event -- would otherwise reject this async
           // callback with nothing attached to catch it, which can crash a
-          // long-running local server. The 200/ndjson header is already
-          // committed by this point, so there is no status left to change;
-          // report what we still can and close the stream either way.
+          // long-running local server. The 200/ndjson header is written
+          // before this try block starts, so response.headersSent is always
+          // true by the time we get here: a `!response.headersSent` branch
+          // here is dead code, and the branch it used to guard (a bare
+          // response.end() with no body) left the browser's stream reader
+          // seeing the connection simply close -- no {type:"done"}, no
+          // {type:"error"}, nothing to show, and Accept/Reject stuck
+          // disabled with no clue why. Always write one error line, in the
+          // same ndjson shape as every other event, before ending.
+          response.write(`${JSON.stringify({ type: "error", text: error.message })}\n`);
+          response.end();
+        }
+      }).catch((error) => {
+        // Belt and suspenders on top of the try/catch just above: if
+        // anything in this callback throws outside that try -- or the catch
+        // block's own response.write/response.end call fails because the
+        // socket is already gone -- this is what keeps a second fault from
+        // rejecting this promise with nothing attached to observe it. Best
+        // effort only; there is nothing further to report it to from here.
+        try {
           if (!response.headersSent) {
             sendJson(response, 500, { error: error.message });
-          } else {
+          } else if (!response.writableEnded) {
             response.end();
           }
+        } catch {
+          // Nothing left to do if even this fails.
         }
       });
       return;
@@ -231,15 +267,33 @@ export function createServer({ token, registryDir = HERE }) {
 
     sendJson(response, 404, { error: "Unknown route" });
   });
+
+  // This has to be the one place that refuses to bind beyond loopback
+  // without a token, not a check startServer() performs before calling
+  // .listen() -- a guarded path beside an unguarded one, since any other
+  // caller doing createServer(...).listen() directly would walk straight
+  // past it. Wrapping .listen() itself means every path that ever commits
+  // this server to a host, including that direct call, goes through the
+  // same guard.
+  const boundListen = server.listen.bind(server);
+  server.listen = (port, host, ...rest) => {
+    if (!isLoopback(host) && token === "") {
+      // .listen() is normally async (errors surface via the "error" event,
+      // not a synchronous throw), but a throw here still reaches
+      // startServer()'s caller correctly: thrown inside a Promise executor,
+      // it becomes a rejection, which is exactly what that function's own
+      // contract already promises. A caller that bypasses startServer and
+      // invokes this directly gets a synchronous, impossible-to-ignore throw
+      // instead of an insecure server that silently came up anyway.
+      throw new Error(`refusing to bind ${host} with no token`);
+    }
+    return boundListen(port, host, ...rest);
+  };
+
+  return server;
 }
 
 export function startServer({ host = "127.0.0.1", port = 0, token = "", registryDir = HERE } = {}) {
-  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
-
-  if (!loopback && token === "") {
-    return Promise.reject(new Error(`refusing to bind ${host} with no token`));
-  }
-
   const server = createServer({ token, registryDir });
 
   return new Promise((resolve, reject) => {

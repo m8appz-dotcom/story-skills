@@ -1,6 +1,7 @@
 import { describe, expect, test, afterAll } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createStoryProject, scanProject, createEntity } from "../src/story.js";
 import { startServer } from "../ui/server.js";
 import { tokenMatches } from "../ui/token.js";
@@ -400,6 +401,64 @@ describe("drafting", () => {
     expect(error).toBeDefined();
     expect(error.text).toContain("codex could not be started");
     expect(error.text).toContain("ENOENT");
+  });
+
+  test("spawns the harness outside the repository with a reduced environment, not the real project tree and the full parent env", async () => {
+    // This is the packet-only guarantee itself: a drafting model gets the
+    // render packet on stdin and nothing else. Flags like codex's -s
+    // read-only still permit reads, so the defence that actually holds is
+    // what cwd and env the child is launched with -- this pins both.
+    const { root } = await seeded("Isolation Novel", (dir) => {
+      createEntity(dir, { kind: "character", name: "Chimpu", role: "protagonist" });
+      createEntity(dir, { kind: "chapter", name: "One", number: 1, pov: "chimpu" });
+    });
+
+    // Stands in for a real secret that would otherwise leak into the child
+    // if runDraft ever regressed to handing it the full parent environment.
+    const hadMarker = Object.prototype.hasOwnProperty.call(process.env, "STORY_SKILLS_TEST_SECRET");
+    process.env.STORY_SKILLS_TEST_SECRET = "should-not-reach-the-child";
+
+    // Captured synchronously inside the spawn call itself: collect() below
+    // drains runDraft to completion, and its `finally` deletes the scratch
+    // directory before collect() ever returns, so "still exists and is
+    // empty" can only be checked here, at the moment the child is spawned --
+    // not after the fact.
+    let seenOptions;
+    let cwdWasEmptyDir = false;
+    const capturingSpawn = (command, args, options) => {
+      seenOptions = options;
+      cwdWasEmptyDir = fs.statSync(options.cwd).isDirectory() && fs.readdirSync(options.cwd).length === 0;
+      return stubSpawn([{ type: "item", item: { type: "agent_message", text: "hi" } }])();
+    };
+
+    try {
+      await collect({ root, chapter: "chapter-01", pov: "chimpu", harness: "codex", spawnImpl: capturingSpawn });
+    } finally {
+      if (!hadMarker) {
+        delete process.env.STORY_SKILLS_TEST_SECRET;
+      }
+    }
+
+    // Not inside this checkout: a model with file tools that ignore the
+    // sandbox flags in harness.js must still find the real manuscript and
+    // ui/projects.json out of reach. Same containment test ui/server.js
+    // itself uses for static files (path.relative, not startsWith -- a
+    // sibling directory that merely shares a prefix must not count as
+    // "inside").
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const rel = path.relative(repoRoot, seenOptions.cwd);
+    const outsideRepo = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+    expect(outsideRepo).toBe(true);
+    // Freshly created and empty at spawn time, not merely "somewhere else".
+    expect(cwdWasEmptyDir).toBe(true);
+
+    // Reduced, not copied: the marker set above was genuinely present in
+    // process.env when the child was spawned, and must not have survived.
+    expect("STORY_SKILLS_TEST_SECRET" in seenOptions.env).toBe(false);
+    expect(Object.keys(seenOptions.env).length).toBeLessThan(Object.keys(process.env).length);
+
+    // The scratch directory is removed once the run ends.
+    expect(fs.existsSync(seenOptions.cwd)).toBe(false);
   });
 });
 
