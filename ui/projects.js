@@ -41,7 +41,9 @@ export function registerRoot(dir, absolutePath) {
 
   // Opaque on purpose: two projects may share a title, and a path does not
   // belong in a URL.
-  const entry = { id: randomBytes(8).toString("hex"), root: project.root, title: project.storyTitle };
+  // scanProject exposes the title on the parsed story file, not as a
+  // storyTitle field -- reading the latter silently stored undefined.
+  const entry = { id: randomBytes(8).toString("hex"), root: project.root, title: project.story.data.title };
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(registryFile(dir), `${JSON.stringify(entries.concat([entry]), null, 2)}\n`, "utf8");
   return entry;

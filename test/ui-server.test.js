@@ -135,8 +135,12 @@ describe("project registry", () => {
     const created = await post("/api/projects", { path: root });
     expect(created.status).toBe(200);
 
-    const { id } = await created.json();
+    const registered = await created.json();
+    const { id } = registered;
     expect(typeof id).toBe("string");
+    // The registry stores the title too, and it must be the real one: the
+    // field this used to read does not exist on a scanned project.
+    expect(registered.title).toBe("Registry Novel");
     // The id is opaque: not the story id, and not the path.
     expect(id).not.toBe(scanProject(root).storyId);
     expect(id).not.toContain(root);
