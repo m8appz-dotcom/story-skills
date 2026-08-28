@@ -28,6 +28,16 @@ export async function stream(path, payload, onEvent) {
     body: JSON.stringify(payload)
   });
 
+  if (!response.ok) {
+    // A 401 (token no longer valid) or 404 (project no longer registered) is
+    // rejected before the ndjson stream ever opens: the server sends one JSON
+    // error object instead of events. Reading it the way call() does keeps it
+    // from being parsed as a line of the stream and silently dropped, which
+    // used to leave the Draft button looking dead -- no message, no error.
+    const body = await response.json();
+    throw new Error(body.error ?? `Request failed with ${response.status}`);
+  }
+
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let carry = "";

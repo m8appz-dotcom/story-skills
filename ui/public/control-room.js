@@ -30,6 +30,15 @@ function grid(projection, povName) {
     list(knowledge.knows ?? []),
     el("h3", { text: "Believes / suspects" }),
     list(held),
+    // Doubts and misbelieves get their own sections rather than folding into
+    // "Believes / suspects": a misbelief is a POV character confidently
+    // holding something false, which is exactly the state a writer must not
+    // mistake for "believes" while drafting -- it needs to stay legible as
+    // its own category, not blended into one that reads as merely uncertain.
+    el("h3", { text: "Doubts" }),
+    list(knowledge.doubts ?? []),
+    el("h3", { text: "Misbelieves" }),
+    list(knowledge.misbelieves ?? []),
     el("h3", { text: "Must not happen" }),
     el("p", {
       class: "constraint",
@@ -68,20 +77,38 @@ export async function openControlRoom(id, chapter, characters, harnesses) {
     on: {
       click: async () => {
         draft.textContent = "";
-        await stream(`/api/project/${id}/draft`,
-          { chapter, pov: pov.value, harness: harness.value },
-          (event) => {
-            if (event.type === "chunk") {
-              draft.textContent += event.text;
-            }
-            if (event.type === "error") {
-              note.textContent = event.text;
-            }
-            if (event.type === "done") {
-              accept.removeAttribute("disabled");
-              note.textContent = `${event.words} words drafted, nothing accepted yet`;
-            }
-          });
+        // Draft is disabled for the run's duration: two quick clicks used to
+        // fire two concurrent streams sharing this one handler, both
+        // appending into `draft` and racing to enable Accept over text that
+        // matched neither candidate file on disk. Accept is reset here too,
+        // so a previous run's enabled Accept can never sit there enabled
+        // while a run it knows nothing about is still in flight.
+        go.setAttribute("disabled", "disabled");
+        accept.setAttribute("disabled", "disabled");
+        try {
+          await stream(`/api/project/${id}/draft`,
+            { chapter, pov: pov.value, harness: harness.value },
+            (event) => {
+              if (event.type === "chunk") {
+                draft.textContent += event.text;
+              }
+              if (event.type === "error") {
+                note.textContent = event.text;
+              }
+              if (event.type === "done") {
+                accept.removeAttribute("disabled");
+                note.textContent = `${event.words} words drafted, nothing accepted yet`;
+              }
+            });
+        } catch (error) {
+          // stream() throws on an HTTP-level failure (401 token no longer
+          // valid, 404 project no longer registered) that never opens the
+          // ndjson stream at all. Without this the failure was swallowed:
+          // the button looked dead with no message and Accept never enabled.
+          note.textContent = error.message;
+        } finally {
+          go.removeAttribute("disabled");
+        }
       }
     }
   });
