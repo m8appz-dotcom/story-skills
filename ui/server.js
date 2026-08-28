@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tokenMatches } from "./token.js";
-import { checkProjectContinuity, projectReport, scanProject, validateLinks, validateProject } from "../src/story.js";
+import { checkProjectContinuity, contextProjection, projectReport, scanProject, validateLinks, validateProject } from "../src/story.js";
 import { harnessNames } from "./harness.js";
 import { listProjects, registerRoot, resolveRoot } from "./projects.js";
 
@@ -129,6 +129,21 @@ export function createServer({ token, registryDir = HERE }) {
         });
       } catch (error) {
         sendJson(response, 404, { error: error.message });
+      }
+      return;
+    }
+
+    const context = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/context$/);
+    if (context && request.method === "GET") {
+      try {
+        const root = resolveRoot(registryDir, context[1]);
+        sendJson(response, 200, contextProjection(root, {
+          chapter: url.searchParams.get("chapter") ?? "",
+          pov: url.searchParams.get("pov") ?? ""
+        }));
+      } catch (error) {
+        // An unregistered id is 404; the engine refusing the request is 400.
+        sendJson(response, error.message.startsWith("Unknown project") ? 404 : 400, { error: error.message });
       }
       return;
     }

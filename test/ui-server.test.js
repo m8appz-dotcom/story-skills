@@ -1,7 +1,7 @@
 import { describe, expect, test, afterAll } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
-import { createStoryProject, scanProject } from "../src/story.js";
+import { createStoryProject, scanProject, createEntity } from "../src/story.js";
 import { startServer } from "../ui/server.js";
 import { tokenMatches } from "../ui/token.js";
 import { makeTempDir } from "./helpers.js";
@@ -188,5 +188,33 @@ describe("project registry", () => {
     const body = await detail.json();
     expect(body.checks.validate.ok).toBe(false);
     expect(body.checks.validate.errors.some((error) => error.includes("status"))).toBe(true);
+  });
+});
+
+async function seeded(title, build) {
+  const cwd = makeTempDir();
+  const { root } = createStoryProject({ cwd, title, force: false });
+  build(root);
+  const { id } = await (await post("/api/projects", { path: root })).json();
+  return { root, id };
+}
+
+describe("context endpoint", () => {
+  test("serves the POV projection the knowledge grid draws", async () => {
+    const { id } = await seeded("Context Novel", (root) => {
+      createEntity(root, { kind: "character", name: "Chimpu", role: "protagonist" });
+      createEntity(root, { kind: "chapter", name: "The Three Places", number: 11, pov: "chimpu" });
+    });
+
+    const response = await get(`/api/project/${id}/context?chapter=chapter-11&pov=chimpu`, TOKEN);
+    expect(response.status).toBe(200);
+
+    const projection = await response.json();
+    expect(projection.pov).toBe("chimpu");
+  });
+
+  test("refuses a chapter the project does not have", async () => {
+    const { id } = await seeded("No Chapter", () => {});
+    expect((await get(`/api/project/${id}/context?chapter=chapter-99&pov=nobody`, TOKEN)).status).toBe(400);
   });
 });
