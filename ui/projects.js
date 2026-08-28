@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { scanProject, validateProject } from "../src/story.js";
+import { scanProject, validateProjectStructure } from "../src/story.js";
 
 // A browser cannot pick a directory on the server, so roots arrive as pasted
 // paths. Each one is proven to be a project before it is remembered.
@@ -20,10 +20,15 @@ export function listProjects(dir) {
 }
 
 export function registerRoot(dir, absolutePath) {
-  // Throws with the engine's own message when the path is not a project.
-  const validation = validateProject(absolutePath);
-  if (!validation.ok) {
-    throw new Error(validation.errors[0]);
+  // Gate registration on structure, not content: a real novel mid-revision
+  // can have a broken arc or bad frontmatter and still needs to be
+  // registrable, because GET /api/project/:id is exactly where those content
+  // errors get surfaced to the user. A project you cannot register is a
+  // project whose failing checks you can never see. Throws with the engine's
+  // own message (not a raw ENOENT) when the path is not a project at all.
+  const structure = validateProjectStructure(absolutePath);
+  if (!structure.ok) {
+    throw new Error(structure.errors[0]);
   }
 
   const project = scanProject(absolutePath);

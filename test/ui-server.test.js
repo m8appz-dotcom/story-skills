@@ -1,27 +1,20 @@
-import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import { describe, expect, test, afterAll } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createStoryProject, scanProject } from "../src/story.js";
 import { startServer } from "../ui/server.js";
 import { tokenMatches } from "../ui/token.js";
+import { makeTempDir } from "./helpers.js";
 
 const TOKEN = "test-token-0123456789";
-const UI_DIR = path.dirname(fileURLToPath(import.meta.url)).replace(/test$/, "ui");
 
-// Clean up the registry file so tests don't interfere with each other.
-function cleanupRegistry() {
-  const registryFile = path.join(UI_DIR, "projects.json");
-  if (fs.existsSync(registryFile)) {
-    fs.unlinkSync(registryFile);
-  }
-}
-
-beforeAll(cleanupRegistry);
-
-const started = await startServer({ host: "127.0.0.1", port: 0, token: TOKEN });
+// A throwaway registryDir per test run, instead of the server's own ui/
+// directory -- so running this suite can never delete or overwrite the real
+// projects.json a developer might have registered against a locally-running
+// server.
+const started = await startServer({ host: "127.0.0.1", port: 0, token: TOKEN, registryDir: makeTempDir() });
 afterAll(() => {
   started.server.close();
-  cleanupRegistry();
 });
 
 function get(path, token) {
@@ -119,9 +112,6 @@ describe("static containment", () => {
   });
 });
 
-import { createStoryProject, scanProject } from "../src/story.js";
-import { makeTempDir } from "./helpers.js";
-
 function post(path, body) {
   return fetch(`http://127.0.0.1:${started.port}${path}`, {
     method: "POST",
@@ -168,5 +158,31 @@ describe("project registry", () => {
 
   test("refuses an unknown project id", async () => {
     expect((await get("/api/project/deadbeef", TOKEN)).status).toBe(404);
+  });
+
+  test("registers a structurally-valid project even when its content fails validation", async () => {
+    const cwd = makeTempDir();
+    const { root } = createStoryProject({ cwd, title: "Mid Revision Novel", force: false });
+
+    // Break content validation (an unsupported enum value) without removing
+    // or renaming any required file -- this project must still register,
+    // because a real novel mid-revision looks exactly like this: structurally
+    // a project, but not yet a valid one.
+    const storyFile = path.join(root, "story.md");
+    fs.writeFileSync(storyFile, fs.readFileSync(storyFile, "utf8").replace("status: planning", "status: not-a-real-status"), "utf8");
+
+    const created = await post("/api/projects", { path: root });
+    expect(created.status).toBe(200);
+
+    const { id } = await created.json();
+    const detail = await get(`/api/project/${id}`, TOKEN);
+    expect(detail.status).toBe(200);
+
+    // The content error must surface through the detail endpoint rather than
+    // block registration -- that surfacing is the entire point of gating
+    // registration on structure instead of full validateProject().
+    const body = await detail.json();
+    expect(body.checks.validate.ok).toBe(false);
+    expect(body.checks.validate.errors.some((error) => error.includes("status"))).toBe(true);
   });
 });

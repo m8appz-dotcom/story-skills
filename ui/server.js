@@ -59,7 +59,11 @@ function sendStatic(response, urlPath) {
   response.end(fs.readFileSync(file));
 }
 
-export function createServer({ token }) {
+// registryDir defaults to HERE (this file's own directory), which keeps
+// production behaviour unchanged -- but it is a parameter, not a constant,
+// so tests can point it at a throwaway directory instead of reading and
+// writing the real projects.json a developer may have running locally.
+export function createServer({ token, registryDir = HERE }) {
   return http.createServer((request, response) => {
     const url = new URL(request.url, "http://localhost");
 
@@ -75,14 +79,14 @@ export function createServer({ token }) {
     }
 
     if (url.pathname === "/api/projects" && request.method === "GET") {
-      sendJson(response, 200, { projects: listProjects(HERE) });
+      sendJson(response, 200, { projects: listProjects(registryDir) });
       return;
     }
 
     if (url.pathname === "/api/projects" && request.method === "POST") {
       readBody(request).then((body) => {
         try {
-          sendJson(response, 200, registerRoot(HERE, String(body.path ?? "")));
+          sendJson(response, 200, registerRoot(registryDir, String(body.path ?? "")));
         } catch (error) {
           sendJson(response, 400, { error: error.message });
         }
@@ -90,10 +94,14 @@ export function createServer({ token }) {
       return;
     }
 
+    // Every route below that resolves a registered project id must go through
+    // this same registryDir -- not HERE -- or it silently falls back to
+    // reading/writing the production registry beside this file, which is
+    // exactly the bug this parameter exists to prevent.
     const detail = url.pathname.match(/^\/api\/project\/([a-f0-9]+)$/);
     if (detail && request.method === "GET") {
       try {
-        const root = resolveRoot(HERE, detail[1]);
+        const root = resolveRoot(registryDir, detail[1]);
         const report = projectReport(root);
         const validate = validateProject(root);
         const links = validateLinks(root);
@@ -129,14 +137,14 @@ export function createServer({ token }) {
   });
 }
 
-export function startServer({ host = "127.0.0.1", port = 0, token = "" } = {}) {
+export function startServer({ host = "127.0.0.1", port = 0, token = "", registryDir = HERE } = {}) {
   const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
 
   if (!loopback && token === "") {
     return Promise.reject(new Error(`refusing to bind ${host} with no token`));
   }
 
-  const server = createServer({ token });
+  const server = createServer({ token, registryDir });
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);
