@@ -119,6 +119,22 @@ the POV-safe projection with constraints self-redacted; that is the
 mechanism preventing a scene in which a character knows something they do
 not. It only holds if the UI opens no side channel.
 
+**How far the first invariant actually reaches.** It holds completely for
+`claude`, which runs with every tool disallowed. `codex` and `gemini` run
+with `--sandbox read-only` and `--approval-mode plan`: they cannot write,
+but they can still read, and `USERPROFILE`/`HOME` have to survive the
+environment allowlist for those CLIs to authenticate at all. The child is
+given an empty temporary working directory and ten environment variables,
+which removes the obvious paths back to the project but does not seal them
+— a determined model could enumerate outward and find the manuscript.
+
+Dropping the weaker harnesses was considered and rejected. Instead the
+Control Room states which is which at the moment of choice: "Sees only the
+packet." against `claude`, "Can also read files on this machine." against
+the other two. A harness added to the table without declaring its isolation
+fails a test rather than defaulting to looking safe. The guarantee is not
+uniform, so the interface says so rather than implying otherwise.
+
 **The model writes prose and only prose.** Its output is written into the
 candidate's `## Chapter Text` section and never into frontmatter.
 Narrative state — who is where, who knows what, what time it is — is
