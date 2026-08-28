@@ -213,8 +213,12 @@ describe("context endpoint", () => {
     expect(projection.pov).toBe("chimpu");
   });
 
-  test("refuses a chapter the project does not have", async () => {
-    const { id } = await seeded("No Chapter", () => {});
+  test("refuses an unknown project id", async () => {
+    expect((await get("/api/project/deadbeef/context", TOKEN)).status).toBe(404);
+  });
+
+  test("refuses an unknown POV", async () => {
+    const { id } = await seeded("No POV", () => {});
     expect((await get(`/api/project/${id}/context?chapter=chapter-99&pov=nobody`, TOKEN)).status).toBe(400);
   });
 });

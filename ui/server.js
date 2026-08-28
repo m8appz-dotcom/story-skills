@@ -135,15 +135,23 @@ export function createServer({ token, registryDir = HERE }) {
 
     const context = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/context$/);
     if (context && request.method === "GET") {
+      let root;
       try {
-        const root = resolveRoot(registryDir, context[1]);
+        root = resolveRoot(registryDir, context[1]);
+      } catch (error) {
+        // An unregistered project id is 404.
+        sendJson(response, 404, { error: error.message });
+        return;
+      }
+
+      try {
         sendJson(response, 200, contextProjection(root, {
           chapter: url.searchParams.get("chapter") ?? "",
           pov: url.searchParams.get("pov") ?? ""
         }));
       } catch (error) {
-        // An unregistered id is 404; the engine refusing the request is 400.
-        sendJson(response, error.message.startsWith("Unknown project") ? 404 : 400, { error: error.message });
+        // The engine refusing the request is 400.
+        sendJson(response, 400, { error: error.message });
       }
       return;
     }
