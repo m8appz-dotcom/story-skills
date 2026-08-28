@@ -418,3 +418,18 @@ describe("draft endpoint", () => {
     expect((await post("/api/project/deadbeef/draft", { chapter: "chapter-01", pov: "", harness: "codex" })).status).toBe(404);
   });
 });
+
+describe("acceptance", () => {
+  test("returns the engine's refusal without writing anything", async () => {
+    const { root, id } = await seeded("Refusal", () => {});
+    const before = fsNode.readdirSync(path.join(root, "chapters")).sort();
+
+    const response = await post(`/api/project/${id}/accept`,
+      { chapter: "chapter-01", candidate: "candidate-001" });
+
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.length).toBeGreaterThan(0);
+    // Nothing moved: the two-phase commit never reached its write pass.
+    expect(fsNode.readdirSync(path.join(root, "chapters")).sort()).toEqual(before);
+  });
+});

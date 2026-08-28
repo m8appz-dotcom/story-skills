@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tokenMatches } from "./token.js";
-import { checkProjectContinuity, contextProjection, projectReport, scanProject, validateLinks, validateProject } from "../src/story.js";
+import { acceptCandidate, checkProjectContinuity, contextProjection, projectReport, rejectCandidate, scanProject, validateLinks, validateProject } from "../src/story.js";
 import { harnessNames } from "./harness.js";
 import { listProjects, registerRoot, resolveRoot } from "./projects.js";
 import { runDraft } from "./draft.js";
@@ -196,6 +196,30 @@ export function createServer({ token, registryDir = HERE }) {
           } else {
             response.end();
           }
+        }
+      });
+      return;
+    }
+
+    const decision = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/(accept|reject)$/);
+    if (decision && request.method === "POST") {
+      readBody(request).then((body) => {
+        let root;
+        try {
+          root = resolveRoot(registryDir, decision[1]);
+        } catch (error) {
+          sendJson(response, 404, { error: error.message });
+          return;
+        }
+
+        try {
+          const options = { chapter: String(body.chapter ?? ""), candidate: String(body.candidate ?? "") };
+          sendJson(response, 200, decision[2] === "accept"
+            ? acceptCandidate(root, options)
+            : rejectCandidate(root, options));
+        } catch (error) {
+          // The engine refused. Acceptance is transactional, so nothing was written.
+          sendJson(response, 409, { error: error.message });
         }
       });
       return;
