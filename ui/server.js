@@ -22,8 +22,22 @@ function sendStatic(response, urlPath) {
   const name = urlPath === "/" ? "index.html" : urlPath.replace(/^\//, "");
   const file = path.join(PUBLIC, name);
 
-  // Containment: a resolved path that escapes PUBLIC is refused outright.
-  if (!file.startsWith(PUBLIC) || !fs.existsSync(file)) {
+  // The real containment happens upstream of this function: new URL() in
+  // createServer() collapses "..", "%2e%2e", and backslash segments out of
+  // url.pathname before urlPath ever reaches here, and path.join (not
+  // path.resolve) never lets a segment in `name` reset the join onto a
+  // different root. This check is a backstop for whatever that pipeline
+  // does not cover -- a later refactor that swaps in path.resolve, a route
+  // that builds `name` some other way, a symlink inside PUBLIC pointing
+  // outward -- not the primary defense. A plain `file.startsWith(PUBLIC)`
+  // would not even do that job: it is satisfied by a sibling directory that
+  // merely shares the prefix, like "public-evil", so it would wave an
+  // escape through while looking like it blocks one. path.relative() is the
+  // real test -- reject anything that climbs out ("..") or lands on an
+  // unrelated root (absolute).
+  const rel = path.relative(PUBLIC, file);
+  const escapesPublic = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  if (escapesPublic || !fs.existsSync(file)) {
     response.writeHead(404).end("Not found");
     return;
   }
