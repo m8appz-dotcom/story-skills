@@ -7,6 +7,20 @@
 
 const DRAFT_INSTRUCTION = "Write the chapter described by the JSON packet on stdin. Output prose only.";
 
+// Every entry below also declares `isolation`: what the Control Room tells
+// the writer, at the moment they pick a harness, about what it can actually
+// see. This is not decorative copy -- harnessInfo() further down refuses to
+// serve a row whose `isolation` is missing or malformed, so a harness added
+// later without one fails a test instead of silently reaching the browser
+// looking as safe as claude's packet-only guarantee.
+//   - packetOnly: true only when the sandboxing is airtight enough that the
+//     packet on stdin really is the whole world (claude's --disallowedTools
+//     below covers every tool, so there is no other channel).
+//   - sees: the short phrase shown next to the picker. It says what the
+//     harness can see, not how it is configured -- "read-only" alone would
+//     read as reassuring, when the ability to read at all is exactly the
+//     leak the read-only/plan-mode flags below do not close. See the
+//     per-flag comments for the mechanism; `sees` is only the disclosure.
 export const HARNESSES = Object.freeze({
   claude: Object.freeze({
     command: "claude",
@@ -20,7 +34,8 @@ export const HARNESSES = Object.freeze({
     ]),
     extract: (parsed) => parsed?.type === "assistant"
       ? (parsed.message?.content ?? []).filter((part) => part?.type === "text").map((part) => part.text).join("")
-      : ""
+      : "",
+    isolation: Object.freeze({ packetOnly: true, sees: "Sees only the packet." })
   }),
   codex: Object.freeze({
     command: "codex",
@@ -36,7 +51,8 @@ export const HARNESSES = Object.freeze({
     ]),
     extract: (parsed) => parsed?.type === "item" && parsed.item?.type === "agent_message"
       ? String(parsed.item.text ?? "")
-      : ""
+      : "",
+    isolation: Object.freeze({ packetOnly: false, sees: "Can also read files on this machine." })
   }),
   gemini: Object.freeze({
     command: "gemini",
@@ -48,7 +64,8 @@ export const HARNESSES = Object.freeze({
       // keeps the manuscript and projects.json out of reach.
       "--approval-mode", "plan"
     ]),
-    extract: (parsed) => parsed?.type === "assistant" ? String(parsed.text ?? "") : ""
+    extract: (parsed) => parsed?.type === "assistant" ? String(parsed.text ?? "") : "",
+    isolation: Object.freeze({ packetOnly: false, sees: "Can also read files on this machine." })
   })
 });
 
@@ -103,6 +120,30 @@ function reducedEnv() {
 
 export function harnessNames() {
   return Object.keys(HARNESSES);
+}
+
+// The disclosure the Control Room shows next to the harness picker (see
+// ui/public/control-room.js): name plus the `isolation` declared on that
+// row above. Throws rather than defaulting a missing/malformed entry to
+// something that reads as safe -- silently falling back would recreate the
+// exact failure mode this feature exists to prevent, just one layer up.
+// `table` defaults to the real HARNESSES and is only a parameter so
+// test/ui-harness.test.js can prove that throw fires, by passing a table
+// with a deliberately incomplete row, without mutating the frozen original.
+export function harnessInfo(table = HARNESSES) {
+  return Object.entries(table).map(([name, harness]) => {
+    const isolation = harness.isolation;
+    const valid = isolation
+      && typeof isolation.packetOnly === "boolean"
+      && typeof isolation.sees === "string"
+      && isolation.sees.trim() !== "";
+
+    if (!valid) {
+      throw new Error(`Harness "${name}" does not declare its isolation`);
+    }
+
+    return { name, packetOnly: isolation.packetOnly, sees: isolation.sees };
+  });
 }
 
 export function buildSpawn(name) {

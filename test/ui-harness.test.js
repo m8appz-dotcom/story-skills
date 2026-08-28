@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildSpawn, extractText, harnessNames } from "../ui/harness.js";
+import { buildSpawn, extractText, harnessNames, harnessInfo, HARNESSES } from "../ui/harness.js";
 
 // Mirrors ui/harness.js's private DRAFT_INSTRUCTION constant. Duplicated
 // rather than imported (it is not exported) so the argv checks below pin the
@@ -15,6 +15,42 @@ describe("harness table", () => {
   test("refuses a key that is not in the table", () => {
     expect(() => buildSpawn("curl")).toThrow("Unknown harness: curl");
     expect(() => buildSpawn("")).toThrow("Unknown harness:");
+  });
+
+  test("declares what each harness can see beyond the packet", () => {
+    // This is the disclosure ui/server.js serves and control-room.js shows
+    // next to the harness picker -- pinned exactly, not just shape-checked,
+    // so a change to the wording (or to which harnesses are packetOnly) is a
+    // deliberate edit to this test, the same way the argv pin below catches
+    // an accidental change to a fixed flag.
+    expect(harnessInfo()).toEqual([
+      { name: "claude", packetOnly: true, sees: "Sees only the packet." },
+      { name: "codex", packetOnly: false, sees: "Can also read files on this machine." },
+      { name: "gemini", packetOnly: false, sees: "Can also read files on this machine." }
+    ]);
+  });
+
+  test("refuses a harness that omits or malforms its isolation declaration", () => {
+    // A harness added to HARNESSES later without a valid `isolation` entry
+    // must fail here, loudly, instead of silently reaching the browser
+    // missing the one disclosure this feature exists to make -- which would
+    // let it default to looking as safe as claude's packet-only guarantee.
+    // `table` is an optional param on harnessInfo() purely so this test can
+    // inject a bad row without mutating the frozen HARNESSES table itself.
+    const missingIsolation = { ...HARNESSES, mystery: { command: "mystery", args: [], extract: () => "" } };
+    expect(() => harnessInfo(missingIsolation)).toThrow("Harness \"mystery\" does not declare its isolation");
+
+    const blankSees = {
+      ...HARNESSES,
+      mystery: { command: "mystery", args: [], extract: () => "", isolation: { packetOnly: true, sees: "" } }
+    };
+    expect(() => harnessInfo(blankSees)).toThrow("Harness \"mystery\" does not declare its isolation");
+
+    const wrongType = {
+      ...HARNESSES,
+      mystery: { command: "mystery", args: [], extract: () => "", isolation: { packetOnly: "yes", sees: "Sees only the packet." } }
+    };
+    expect(() => harnessInfo(wrongType)).toThrow("Harness \"mystery\" does not declare its isolation");
   });
 
   test("strips the nesting guard from the child environment", () => {

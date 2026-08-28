@@ -155,7 +155,14 @@ describe("project registry", () => {
     expect(typeof body.chapters).toBe("number");
     expect(typeof body.words).toBe("number");
     expect(Array.isArray(body.characters)).toBe(true);
-    expect(body.harnesses).toEqual(["claude", "codex", "gemini"]);
+    // Each entry carries the isolation disclosure control-room.js shows next
+    // to the harness picker, not just a bare name -- see harnessInfo() in
+    // ui/harness.js, which is the only place these values are set.
+    expect(body.harnesses).toEqual([
+      { name: "claude", packetOnly: true, sees: "Sees only the packet." },
+      { name: "codex", packetOnly: false, sees: "Can also read files on this machine." },
+      { name: "gemini", packetOnly: false, sees: "Can also read files on this machine." }
+    ]);
     expect(body.checks.validate.ok).toBe(true);
     expect(body.checks.links.ok).toBe(true);
     expect(body.checks.continuity.ok).toBe(true);

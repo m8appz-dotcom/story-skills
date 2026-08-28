@@ -14,7 +14,7 @@ tbody tr:hover { background: var(--raised); cursor: pointer; }
 .prose h2 { font: 500 11px/1 "IBM Plex Mono", ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .prose #draft { white-space: pre-wrap; min-height: 12rem; border-left: 2px solid var(--rule); padding-left: 1rem; }
 .actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
-.actions #note { color: var(--muted); font-size: 13px; }
+.actions #note, .actions #isolation { color: var(--muted); font-size: 13px; }
 .side { min-width: 0; }
 .knowledge { font: 13px/1.5 "IBM Plex Mono", ui-monospace, monospace; }
 .knowledge h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: .25rem; }

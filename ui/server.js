@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tokenMatches } from "./token.js";
 import { acceptCandidate, checkProjectContinuity, contextProjection, projectReport, rejectCandidate, scanProject, validateLinks, validateProject } from "../src/story.js";
-import { harnessNames } from "./harness.js";
+import { harnessInfo } from "./harness.js";
 import { listProjects, registerRoot, resolveRoot } from "./projects.js";
 import { runDraft } from "./draft.js";
 
@@ -137,8 +137,11 @@ export function createServer({ token, registryDir = HERE }) {
           // the cast instead.
           characters: scanProject(root).characters.map((item) => ({ id: item.id, name: item.name })),
           // Served rather than hardcoded in the browser, so the table in
-          // harness.js stays the only place a provider is named.
-          harnesses: harnessNames(),
+          // harness.js stays the only place a provider is named. Each entry
+          // is { name, packetOnly, sees } -- harnessInfo() throws instead of
+          // serving a row missing that disclosure, so the Control Room can
+          // never silently show a harness with no isolation information.
+          harnesses: harnessInfo(),
           checks: {
             validate: { ok: validate.ok, errors: validate.errors },
             links: { ok: links.ok, errors: links.errors },

@@ -49,10 +49,22 @@ function grid(projection, povName) {
 
 export async function openControlRoom(id, chapter, characters, harnesses) {
   // Both lists come from the server: the cast for the POV picker, and the
-  // harness names so the table in harness.js stays the only place a provider
-  // is named.
+  // harness table so the table in harness.js stays the only place a
+  // provider is named. Each entry is { name, packetOnly, sees } -- see
+  // ui/harness.js's harnessInfo().
   const pov = el("select", {}, characters.map((item) => el("option", { value: item.id, text: item.name })));
-  const harness = el("select", {}, harnesses.map((name) => el("option", { text: name })));
+  const harness = el("select", {}, harnesses.map((info) => el("option", { value: info.name, text: info.name })));
+
+  // A <select> change event hands back only the chosen value, so the honest
+  // phrase for that harness is looked up here rather than carried on the
+  // <option> itself. This is the disclosure the whole feature is for: what a
+  // harness can see beyond the packet, shown before the writer presses
+  // Draft, for whichever harness is currently selected.
+  const isolationByHarness = new Map(harnesses.map((info) => [info.name, info.sees]));
+  const isolation = el("span", { id: "isolation", text: isolationByHarness.get(harness.value) ?? "" });
+  harness.addEventListener("change", () => {
+    isolation.textContent = isolationByHarness.get(harness.value) ?? "";
+  });
 
   const draft = el("div", { id: "draft" });
   const note = el("span", { id: "note", text: "nothing has changed yet" });
@@ -167,7 +179,7 @@ export async function openControlRoom(id, chapter, characters, harnesses) {
       el("h2", { text: chapter }),
       el("p", { class: "actions" }, [el("label", { text: "POV" }), pov]),
       draft,
-      el("p", { class: "actions" }, [harness, go, accept, reject, note])
+      el("p", { class: "actions" }, [harness, isolation, go, accept, reject, note])
     ]),
     side
   ]));
