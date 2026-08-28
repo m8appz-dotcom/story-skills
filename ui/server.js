@@ -1,0 +1,309 @@
+import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { tokenMatches } from "./token.js";
+import { acceptCandidate, checkProjectContinuity, contextProjection, projectReport, rejectCandidate, scanProject, validateLinks, validateProject } from "../src/story.js";
+import { harnessInfo } from "./harness.js";
+import { listProjects, registerRoot, resolveRoot } from "./projects.js";
+import { runDraft } from "./draft.js";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC = path.join(HERE, "public");
+
+const CONTENT_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8"
+};
+
+function sendJson(response, status, body) {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(body));
+}
+
+function readBody(request) {
+  return new Promise((resolve) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      try { resolve(JSON.parse(raw || "{}")); } catch { resolve({}); }
+    });
+  });
+}
+
+function sendStatic(response, urlPath) {
+  const name = urlPath === "/" ? "index.html" : urlPath.replace(/^\//, "");
+  const file = path.join(PUBLIC, name);
+
+  // The real containment happens upstream of this function: new URL() in
+  // createServer() collapses "..", "%2e%2e", and backslash segments out of
+  // url.pathname before urlPath ever reaches here, and path.join (not
+  // path.resolve) never lets a segment in `name` reset the join onto a
+  // different root. This check is a backstop for whatever that pipeline
+  // does not cover -- a later refactor that swaps in path.resolve, a route
+  // that builds `name` some other way, a symlink inside PUBLIC pointing
+  // outward -- not the primary defense. A plain `file.startsWith(PUBLIC)`
+  // would not even do that job: it is satisfied by a sibling directory that
+  // merely shares the prefix, like "public-evil", so it would wave an
+  // escape through while looking like it blocks one. path.relative() is the
+  // real test -- reject anything that climbs out ("..") or lands on an
+  // unrelated root (absolute).
+  const rel = path.relative(PUBLIC, file);
+  const escapesPublic = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  if (escapesPublic || !fs.existsSync(file)) {
+    response.writeHead(404).end("Not found");
+    return;
+  }
+
+  response.writeHead(200, { "content-type": CONTENT_TYPES[path.extname(file)] ?? "application/octet-stream" });
+  response.end(fs.readFileSync(file));
+}
+
+// True for the loopback host names/addresses this server treats as
+// inherently local: reachable only from this machine, so a missing token is
+// not a way for anyone else to reach the API.
+function isLoopback(host) {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+// registryDir defaults to HERE (this file's own directory), which keeps
+// production behaviour unchanged -- but it is a parameter, not a constant,
+// so tests can point it at a throwaway directory instead of reading and
+// writing the real projects.json a developer may have running locally.
+export function createServer({ token, registryDir = HERE }) {
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, "http://localhost");
+
+    if (!url.pathname.startsWith("/api/")) {
+      sendStatic(response, url.pathname);
+      return;
+    }
+
+    if (!tokenMatches(token, request.headers["x-story-token"])) {
+      // Deliberately says nothing about why.
+      sendJson(response, 401, { error: "Unauthorized" });
+      return;
+    }
+
+    if (url.pathname === "/api/projects" && request.method === "GET") {
+      sendJson(response, 200, { projects: listProjects(registryDir) });
+      return;
+    }
+
+    if (url.pathname === "/api/projects" && request.method === "POST") {
+      readBody(request).then((body) => {
+        try {
+          sendJson(response, 200, registerRoot(registryDir, String(body.path ?? "")));
+        } catch (error) {
+          sendJson(response, 400, { error: error.message });
+        }
+      });
+      return;
+    }
+
+    // Every route below that resolves a registered project id must go through
+    // this same registryDir -- not HERE -- or it silently falls back to
+    // reading/writing the production registry beside this file, which is
+    // exactly the bug this parameter exists to prevent.
+    const detail = url.pathname.match(/^\/api\/project\/([a-f0-9]+)$/);
+    if (detail && request.method === "GET") {
+      try {
+        const root = resolveRoot(registryDir, detail[1]);
+        const report = projectReport(root);
+        // These three look redundant next to projectReport just above, which
+        // already computes its own validation/links/continuity internally --
+        // but they are not equivalent, so do not collapse them onto
+        // report.validation/report.links/report.continuity. In particular,
+        // report.continuity is checkContinuity() alone, while
+        // checkProjectContinuity() below merges seven checks (continuity,
+        // epistemic graph, relationships, state snapshots, transactions,
+        // arcs, causal chains). Reusing report.continuity here would quietly
+        // narrow what this endpoint -- and therefore the UI -- reports as
+        // "continuity" down to one of those seven checks.
+        const validate = validateProject(root);
+        const links = validateLinks(root);
+        const continuity = checkProjectContinuity(root);
+
+        sendJson(response, 200, {
+          title: report.title,
+          // counts.chapters is the number. report.chapters is the array of
+          // chapter objects, and report.words does not exist at all.
+          chapters: report.counts.chapters,
+          words: report.counts.words,
+          // The Control Room needs a POV character, and a chapter that does not
+          // exist yet cannot supply one. report.pov is the narrative mode
+          // ("third-person-limited"), not a character, so the picker is fed from
+          // the cast instead.
+          characters: scanProject(root).characters.map((item) => ({ id: item.id, name: item.name })),
+          // Served rather than hardcoded in the browser, so the table in
+          // harness.js stays the only place a provider is named. Each entry
+          // is { name, packetOnly, sees } -- harnessInfo() throws instead of
+          // serving a row missing that disclosure, so the Control Room can
+          // never silently show a harness with no isolation information.
+          harnesses: harnessInfo(),
+          checks: {
+            validate: { ok: validate.ok, errors: validate.errors },
+            links: { ok: links.ok, errors: links.errors },
+            continuity: { ok: continuity.ok, errors: continuity.errors }
+          }
+        });
+      } catch (error) {
+        sendJson(response, 404, { error: error.message });
+      }
+      return;
+    }
+
+    const context = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/context$/);
+    if (context && request.method === "GET") {
+      let root;
+      try {
+        root = resolveRoot(registryDir, context[1]);
+      } catch (error) {
+        // An unregistered project id is 404.
+        sendJson(response, 404, { error: error.message });
+        return;
+      }
+
+      try {
+        sendJson(response, 200, contextProjection(root, {
+          chapter: url.searchParams.get("chapter") ?? "",
+          pov: url.searchParams.get("pov") ?? ""
+        }));
+      } catch (error) {
+        // The engine refusing the request is 400.
+        sendJson(response, 400, { error: error.message });
+      }
+      return;
+    }
+
+    const draft = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/draft$/);
+    if (draft && request.method === "POST") {
+      readBody(request).then(async (body) => {
+        let root;
+        try {
+          root = resolveRoot(registryDir, draft[1]);
+        } catch (error) {
+          sendJson(response, 404, { error: error.message });
+          return;
+        }
+
+        // Line-delimited JSON rather than SSE: EventSource issues a GET and
+        // cannot carry the token header.
+        response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8" });
+
+        try {
+          for await (const event of runDraft({
+            root,
+            chapter: String(body.chapter ?? ""),
+            pov: String(body.pov ?? ""),
+            harness: String(body.harness ?? "")
+          })) {
+            response.write(`${JSON.stringify(event)}\n`);
+          }
+
+          response.end();
+        } catch (error) {
+          // A stream-level failure -- e.g. child.stdout itself erroring,
+          // distinct from a spawn error runDraft already turns into a normal
+          // {type: "error"} event -- would otherwise reject this async
+          // callback with nothing attached to catch it, which can crash a
+          // long-running local server. The 200/ndjson header is written
+          // before this try block starts, so response.headersSent is always
+          // true by the time we get here: a `!response.headersSent` branch
+          // here is dead code, and the branch it used to guard (a bare
+          // response.end() with no body) left the browser's stream reader
+          // seeing the connection simply close -- no {type:"done"}, no
+          // {type:"error"}, nothing to show, and Accept/Reject stuck
+          // disabled with no clue why. Always write one error line, in the
+          // same ndjson shape as every other event, before ending.
+          response.write(`${JSON.stringify({ type: "error", text: error.message })}\n`);
+          response.end();
+        }
+      }).catch((error) => {
+        // Belt and suspenders on top of the try/catch just above: if
+        // anything in this callback throws outside that try -- or the catch
+        // block's own response.write/response.end call fails because the
+        // socket is already gone -- this is what keeps a second fault from
+        // rejecting this promise with nothing attached to observe it. Best
+        // effort only; there is nothing further to report it to from here.
+        try {
+          if (!response.headersSent) {
+            sendJson(response, 500, { error: error.message });
+          } else if (!response.writableEnded) {
+            response.end();
+          }
+        } catch {
+          // Nothing left to do if even this fails.
+        }
+      });
+      return;
+    }
+
+    const decision = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/(accept|reject)$/);
+    if (decision && request.method === "POST") {
+      readBody(request).then((body) => {
+        let root;
+        try {
+          root = resolveRoot(registryDir, decision[1]);
+        } catch (error) {
+          sendJson(response, 404, { error: error.message });
+          return;
+        }
+
+        try {
+          const options = { chapter: String(body.chapter ?? ""), candidate: String(body.candidate ?? "") };
+          sendJson(response, 200, decision[2] === "accept"
+            ? acceptCandidate(root, options)
+            : rejectCandidate(root, options));
+        } catch (error) {
+          // The engine refused, and both actions validate fully before writing
+          // anything, so a refusal that lands here has touched nothing. Recovery
+          // from a failure part-way through the write pass is the transaction's
+          // own job and is covered in test/v3-commit.test.js, which drives
+          // commitWrites directly -- acceptance cannot reach that state.
+          sendJson(response, 409, { error: error.message });
+        }
+      });
+      return;
+    }
+
+    sendJson(response, 404, { error: "Unknown route" });
+  });
+
+  // This has to be the one place that refuses to bind beyond loopback
+  // without a token, not a check startServer() performs before calling
+  // .listen() -- a guarded path beside an unguarded one, since any other
+  // caller doing createServer(...).listen() directly would walk straight
+  // past it. Wrapping .listen() itself means every path that ever commits
+  // this server to a host, including that direct call, goes through the
+  // same guard.
+  const boundListen = server.listen.bind(server);
+  server.listen = (port, host, ...rest) => {
+    if (!isLoopback(host) && token === "") {
+      // .listen() is normally async (errors surface via the "error" event,
+      // not a synchronous throw), but a throw here still reaches
+      // startServer()'s caller correctly: thrown inside a Promise executor,
+      // it becomes a rejection, which is exactly what that function's own
+      // contract already promises. A caller that bypasses startServer and
+      // invokes this directly gets a synchronous, impossible-to-ignore throw
+      // instead of an insecure server that silently came up anyway.
+      throw new Error(`refusing to bind ${host} with no token`);
+    }
+    return boundListen(port, host, ...rest);
+  };
+
+  return server;
+}
+
+export function startServer({ host = "127.0.0.1", port = 0, token = "", registryDir = HERE } = {}) {
+  const server = createServer({ token, registryDir });
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      const bound = server.address().port;
+      resolve({ server, port: bound, url: `http://${host}:${bound}/?t=${token}` });
+    });
+  });
+}

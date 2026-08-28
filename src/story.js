@@ -425,10 +425,14 @@ export function scanProject(root) {
   };
 }
 
-export function validateProject(root) {
+// Structural check only: does this path have the files and directories a
+// story project must have? This is deliberately cheaper than validateProject()
+// below -- it never reads frontmatter or cross-references content, so a
+// caller that only needs to know "is this a project at all" (registration,
+// for instance) is not forced to also demand clean content.
+export function validateProjectStructure(root) {
   const projectRoot = path.resolve(root);
   const errors = [];
-  const warnings = [];
 
   for (const requiredPath of REQUIRED_PATHS) {
     if (!fs.existsSync(path.join(projectRoot, requiredPath))) {
@@ -436,10 +440,18 @@ export function validateProject(root) {
     }
   }
 
-  if (errors.length > 0) {
-    return { ok: false, errors, warnings };
+  return { ok: errors.length === 0, errors, warnings: [] };
+}
+
+export function validateProject(root) {
+  const projectRoot = path.resolve(root);
+  const structure = validateProjectStructure(projectRoot);
+  if (!structure.ok) {
+    return structure;
   }
 
+  const errors = [];
+  const warnings = [];
   const project = scanProject(projectRoot);
   validateStoryFrontmatter(project, errors);
   validateIndexFrontmatter(project, errors);

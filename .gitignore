@@ -8,3 +8,5 @@ coverage/
 # Seeded design-canvas payload: a ~2MB build artifact, re-seeded from the
 # .dc.html sources with the design skill. Not source.
 design/story-engine-ui-directions.html
+ui/projects.json
+ui/.token
