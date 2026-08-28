@@ -57,7 +57,16 @@ export async function openControlRoom(id, chapter, characters, harnesses) {
   const draft = el("div", { id: "draft" });
   const note = el("span", { id: "note", text: "nothing has changed yet" });
   const accept = el("button", { text: "Accept", disabled: "disabled" });
+  const reject = el("button", { text: "Reject", disabled: "disabled" });
   const side = el("div", { class: "side" });
+
+  // The id of the candidate the most recent completed draft produced. This is
+  // the only thing (besides `chapter`, fixed for this room) accept/reject
+  // send to the engine. Null whenever there is nothing to decide on: before
+  // the first draft, while one is running, and once a decision has gone
+  // through -- in every one of those states Accept/Reject are also disabled,
+  // so the two stay in lockstep.
+  let candidate = null;
 
   async function showKnowledge() {
     clear(side);
@@ -72,6 +81,40 @@ export async function openControlRoom(id, chapter, characters, harnesses) {
   // Changing POV changes what may be written, so the grid reloads with it.
   pov.addEventListener("change", showKnowledge);
 
+  // Shared by both buttons: same endpoint shape, same disable/report
+  // choreography, differing only in which route and verb apply.
+  async function decide(action) {
+    // Disabled for the request's duration -- the same reasoning as Draft
+    // below. A candidate can only be resolved once, so a second click before
+    // the first response lands must never reach the engine as a second
+    // accept or reject.
+    accept.setAttribute("disabled", "disabled");
+    reject.setAttribute("disabled", "disabled");
+    try {
+      const receipt = await call(`/api/project/${id}/${action}`, {
+        method: "POST",
+        body: JSON.stringify({ chapter, candidate })
+      });
+      // The receipt names how many files the engine actually touched --
+      // that says what happened; "done" would not. Both buttons stay
+      // disabled: the candidate is now resolved, and there is nothing left
+      // to accept or reject a second time.
+      note.textContent = `${action === "accept" ? "Accepted" : "Rejected"}: ${receipt.changed.length} file(s) changed`;
+    } catch (error) {
+      // Both actions validate fully before writing anything (see
+      // ui/server.js), so a 409 refusal here has touched nothing -- the
+      // candidate is exactly as decidable as it was before this click.
+      // Re-enable both rather than stranding the writer with two dead
+      // buttons, and never report success for a request that failed.
+      note.textContent = error.message;
+      accept.removeAttribute("disabled");
+      reject.removeAttribute("disabled");
+    }
+  }
+
+  accept.addEventListener("click", () => decide("accept"));
+  reject.addEventListener("click", () => decide("reject"));
+
   const go = el("button", {
     text: "Draft",
     on: {
@@ -80,11 +123,14 @@ export async function openControlRoom(id, chapter, characters, harnesses) {
         // Draft is disabled for the run's duration: two quick clicks used to
         // fire two concurrent streams sharing this one handler, both
         // appending into `draft` and racing to enable Accept over text that
-        // matched neither candidate file on disk. Accept is reset here too,
-        // so a previous run's enabled Accept can never sit there enabled
-        // while a run it knows nothing about is still in flight.
+        // matched neither candidate file on disk. Accept/Reject are reset
+        // here too, along with the candidate id they would act on, so a
+        // previous run's enabled buttons -- and the candidate they pointed
+        // at -- can never survive into a run they know nothing about.
+        candidate = null;
         go.setAttribute("disabled", "disabled");
         accept.setAttribute("disabled", "disabled");
+        reject.setAttribute("disabled", "disabled");
         try {
           await stream(`/api/project/${id}/draft`,
             { chapter, pov: pov.value, harness: harness.value },
@@ -96,7 +142,9 @@ export async function openControlRoom(id, chapter, characters, harnesses) {
                 note.textContent = event.text;
               }
               if (event.type === "done") {
+                candidate = event.candidate;
                 accept.removeAttribute("disabled");
+                reject.removeAttribute("disabled");
                 note.textContent = `${event.words} words drafted, nothing accepted yet`;
               }
             });
@@ -119,7 +167,7 @@ export async function openControlRoom(id, chapter, characters, harnesses) {
       el("h2", { text: chapter }),
       el("p", { class: "actions" }, [el("label", { text: "POV" }), pov]),
       draft,
-      el("p", { class: "actions" }, [harness, go, accept, note])
+      el("p", { class: "actions" }, [harness, go, accept, reject, note])
     ]),
     side
   ]));

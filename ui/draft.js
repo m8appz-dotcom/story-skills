@@ -25,13 +25,16 @@ export async function* runDraft({ root, chapter, pov, harness, spawnImpl = nodeS
 
   let packet;
   let file;
+  let candidate;
 
   try {
     // renderPacket takes the project root itself and scans internally
     // (mirrors contextProjection's own call shape in ui/server.js); it must
     // not be handed an already-scanned project object here.
     packet = renderPacket(root, { chapter, pov }).packet;
-    file = createCandidate(root, { chapter, title: chapter, pov }).file;
+    // The browser needs this id to call accept/reject -- it has no business
+    // parsing one back out of the absolute server-side path in `file`.
+    ({ file, candidate } = createCandidate(root, { chapter, title: chapter, pov }));
   } catch (error) {
     yield { type: "error", text: error.message };
     return;
@@ -106,5 +109,10 @@ export async function* runDraft({ root, chapter, pov, harness, spawnImpl = nodeS
   const head = markdown.split(PROSE_HEADING)[0];
   fs.writeFileSync(file, `${head}${PROSE_HEADING}\n\n${prose.trim()}\n`, "utf8");
 
-  yield { type: "done", candidateFile: file, words: prose.trim().split(/\s+/).filter(Boolean).length };
+  yield {
+    type: "done",
+    candidateFile: file,
+    candidate,
+    words: prose.trim().split(/\s+/).filter(Boolean).length
+  };
 }

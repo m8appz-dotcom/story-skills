@@ -304,6 +304,11 @@ describe("drafting", () => {
 
     const done = events.find((event) => event.type === "done");
     expect(done).toBeDefined();
+    // The browser calls accept/reject with this id, not with candidateFile --
+    // it has no business parsing a server-side absolute path. It must be the
+    // real id createCandidate assigned, not just any string.
+    expect(done.candidate).toBe("candidate-001");
+    expect(path.basename(done.candidateFile)).toBe("candidate-001.md");
 
     const written = fsNode.readFileSync(done.candidateFile, "utf8");
     expect(written).toContain("The light went.");
