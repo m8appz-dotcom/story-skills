@@ -1,10 +1,28 @@
-import { describe, expect, test, afterAll } from "bun:test";
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { startServer } from "../ui/server.js";
 import { tokenMatches } from "../ui/token.js";
 
 const TOKEN = "test-token-0123456789";
+const UI_DIR = path.dirname(fileURLToPath(import.meta.url)).replace(/test$/, "ui");
+
+// Clean up the registry file so tests don't interfere with each other.
+function cleanupRegistry() {
+  const registryFile = path.join(UI_DIR, "projects.json");
+  if (fs.existsSync(registryFile)) {
+    fs.unlinkSync(registryFile);
+  }
+}
+
+beforeAll(cleanupRegistry);
+
 const started = await startServer({ host: "127.0.0.1", port: 0, token: TOKEN });
-afterAll(() => started.server.close());
+afterAll(() => {
+  started.server.close();
+  cleanupRegistry();
+});
 
 function get(path, token) {
   return fetch(`http://127.0.0.1:${started.port}${path}`,
@@ -98,5 +116,57 @@ describe("static containment", () => {
     // (nonexistent) filename containing percent signs, not a path that
     // climbs out of public.
     expect((await get("/%2e%2e%2fserver.js")).status).toBe(404);
+  });
+});
+
+import { createStoryProject, scanProject } from "../src/story.js";
+import { makeTempDir } from "./helpers.js";
+
+function post(path, body) {
+  return fetch(`http://127.0.0.1:${started.port}${path}`, {
+    method: "POST",
+    headers: { "X-Story-Token": TOKEN, "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+describe("project registry", () => {
+  test("refuses a path that is not a story project", async () => {
+    const response = await post("/api/projects", { path: makeTempDir() });
+    expect(response.status).toBe(400);
+    // The engine's own words, not a stack trace.
+    expect((await response.json()).error).toContain("Missing");
+  });
+
+  test("remembers a real project and reports it", async () => {
+    const cwd = makeTempDir();
+    const { root } = createStoryProject({ cwd, title: "Registry Novel", force: false });
+
+    const created = await post("/api/projects", { path: root });
+    expect(created.status).toBe(200);
+
+    const { id } = await created.json();
+    expect(typeof id).toBe("string");
+    // The id is opaque: not the story id, and not the path.
+    expect(id).not.toBe(scanProject(root).storyId);
+    expect(id).not.toContain(root);
+
+    const detail = await get(`/api/project/${id}`, TOKEN);
+    expect(detail.status).toBe(200);
+
+    const body = await detail.json();
+    expect(body.title).toBe("Registry Novel");
+    // A count, not the array of chapter objects.
+    expect(typeof body.chapters).toBe("number");
+    expect(typeof body.words).toBe("number");
+    expect(Array.isArray(body.characters)).toBe(true);
+    expect(body.harnesses).toEqual(["claude", "codex", "gemini"]);
+    expect(body.checks.validate.ok).toBe(true);
+    expect(body.checks.links.ok).toBe(true);
+    expect(body.checks.continuity.ok).toBe(true);
+  });
+
+  test("refuses an unknown project id", async () => {
+    expect((await get("/api/project/deadbeef", TOKEN)).status).toBe(404);
   });
 });

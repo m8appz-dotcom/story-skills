@@ -3,6 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tokenMatches } from "./token.js";
+import { checkProjectContinuity, projectReport, scanProject, validateLinks, validateProject } from "../src/story.js";
+import { harnessNames } from "./harness.js";
+import { listProjects, registerRoot, resolveRoot } from "./projects.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, "public");
@@ -16,6 +19,16 @@ const CONTENT_TYPES = {
 function sendJson(response, status, body) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
+}
+
+function readBody(request) {
+  return new Promise((resolve) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      try { resolve(JSON.parse(raw || "{}")); } catch { resolve({}); }
+    });
+  });
 }
 
 function sendStatic(response, urlPath) {
@@ -62,7 +75,53 @@ export function createServer({ token }) {
     }
 
     if (url.pathname === "/api/projects" && request.method === "GET") {
-      sendJson(response, 200, { projects: [] });
+      sendJson(response, 200, { projects: listProjects(HERE) });
+      return;
+    }
+
+    if (url.pathname === "/api/projects" && request.method === "POST") {
+      readBody(request).then((body) => {
+        try {
+          sendJson(response, 200, registerRoot(HERE, String(body.path ?? "")));
+        } catch (error) {
+          sendJson(response, 400, { error: error.message });
+        }
+      });
+      return;
+    }
+
+    const detail = url.pathname.match(/^\/api\/project\/([a-f0-9]+)$/);
+    if (detail && request.method === "GET") {
+      try {
+        const root = resolveRoot(HERE, detail[1]);
+        const report = projectReport(root);
+        const validate = validateProject(root);
+        const links = validateLinks(root);
+        const continuity = checkProjectContinuity(root);
+
+        sendJson(response, 200, {
+          title: report.title,
+          // counts.chapters is the number. report.chapters is the array of
+          // chapter objects, and report.words does not exist at all.
+          chapters: report.counts.chapters,
+          words: report.counts.words,
+          // The Control Room needs a POV character, and a chapter that does not
+          // exist yet cannot supply one. report.pov is the narrative mode
+          // ("third-person-limited"), not a character, so the picker is fed from
+          // the cast instead.
+          characters: scanProject(root).characters.map((item) => ({ id: item.id, name: item.name })),
+          // Served rather than hardcoded in the browser, so the table in
+          // harness.js stays the only place a provider is named.
+          harnesses: harnessNames(),
+          checks: {
+            validate: { ok: validate.ok, errors: validate.errors },
+            links: { ok: links.ok, errors: links.errors },
+            continuity: { ok: continuity.ok, errors: continuity.errors }
+          }
+        });
+      } catch (error) {
+        sendJson(response, 404, { error: error.message });
+      }
       return;
     }
 
