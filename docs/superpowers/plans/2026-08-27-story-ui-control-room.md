@@ -440,6 +440,11 @@ describe("project registry", () => {
 
     const body = await detail.json();
     expect(body.title).toBe("Registry Novel");
+    // A count, not the array of chapter objects.
+    expect(typeof body.chapters).toBe("number");
+    expect(typeof body.words).toBe("number");
+    expect(Array.isArray(body.characters)).toBe(true);
+    expect(body.harnesses).toEqual(["claude", "codex", "gemini"]);
     expect(body.checks.validate.ok).toBe(true);
     expect(body.checks.links.ok).toBe(true);
     expect(body.checks.continuity.ok).toBe(true);
@@ -514,7 +519,8 @@ export function resolveRoot(dir, id) {
 Add at the top:
 
 ```js
-import { checkProjectContinuity, projectReport, validateLinks, validateProject } from "../src/story.js";
+import { checkProjectContinuity, projectReport, scanProject, validateLinks, validateProject } from "../src/story.js";
+import { harnessNames } from "./harness.js";
 import { listProjects, registerRoot, resolveRoot } from "./projects.js";
 
 function readBody(request) {
@@ -558,8 +564,18 @@ Replace the stub `/api/projects` block with:
 
         sendJson(response, 200, {
           title: report.title,
-          chapters: report.chapters,
-          words: report.words,
+          // counts.chapters is the number. report.chapters is the array of
+          // chapter objects, and report.words does not exist at all.
+          chapters: report.counts.chapters,
+          words: report.counts.words,
+          // The Control Room needs a POV character, and a chapter that does not
+          // exist yet cannot supply one. report.pov is the narrative mode
+          // ("third-person-limited"), not a character, so the picker is fed from
+          // the cast instead.
+          characters: scanProject(root).characters.map((item) => ({ id: item.id, name: item.name })),
+          // Served rather than hardcoded in the browser, so the table in
+          // harness.js stays the only place a provider is named.
+          harnesses: harnessNames(),
           checks: {
             validate: { ok: validate.ok, errors: validate.errors },
             links: { ok: links.ok, errors: links.errors },
@@ -1137,7 +1153,9 @@ function row(project, open) {
 async function open(project) {
   const { openControlRoom } = await import("./control-room.js");
   const next = `chapter-${String((project.chapters ?? 0) + 1).padStart(2, "0")}`;
-  openControlRoom(project.id, next, project.pov ?? "");
+  // No POV is passed: project.pov is the narrative mode, not a character.
+  // The Control Room picks one from the cast.
+  openControlRoom(project.id, next, project.characters ?? [], project.harnesses ?? []);
 }
 
 export async function render() {
@@ -1243,7 +1261,7 @@ git commit -m "feat: Projects screen and the UI entry point"
 
 **Interfaces:**
 - Consumes: `call`, `stream` (Task 7); `el`, `clear` (Task 7).
-- Produces: `openControlRoom(id, chapter, pov): Promise<void>`.
+- Produces: `openControlRoom(id, chapter, characters, harnesses): Promise<void>` — `characters` is `[{id, name}]` and `harnesses` is `string[]`, both from `GET /api/project/:id`.
 
 - [ ] **Step 1: Write `ui/public/control-room.js`**
 
@@ -1267,7 +1285,7 @@ function list(items) {
     ])));
 }
 
-function grid(projection) {
+function grid(projection, povName) {
   const knowledge = projection.knowledge ?? {};
   const held = (knowledge.believes ?? []).concat(knowledge.suspects ?? []);
 
@@ -1283,36 +1301,55 @@ function grid(projection) {
     el("h3", { text: "Must not happen" }),
     el("p", {
       class: "constraint",
-      text: `${projection.pov} must not learn, infer, or be told anything beyond this.`
+      text: `${povName} must not learn, infer, or be told anything beyond this.`
     })
   ]);
 }
 
-export async function openControlRoom(id, chapter, pov) {
-  const projection = await call(`/api/project/${id}/context?chapter=${chapter}&pov=${pov}`);
+export async function openControlRoom(id, chapter, characters, harnesses) {
+  // Both lists come from the server: the cast for the POV picker, and the
+  // harness names so the table in harness.js stays the only place a provider
+  // is named.
+  const pov = el("select", {}, characters.map((item) => el("option", { value: item.id, text: item.name })));
+  const harness = el("select", {}, harnesses.map((name) => el("option", { text: name })));
 
   const draft = el("div", { id: "draft" });
   const note = el("span", { id: "note", text: "nothing has changed yet" });
   const accept = el("button", { text: "Accept", disabled: "disabled" });
-  const harness = el("select", {}, ["codex", "claude", "gemini"].map((name) => el("option", { text: name })));
+  const side = el("div", { class: "side" });
+
+  async function showKnowledge() {
+    clear(side);
+    try {
+      const projection = await call(`/api/project/${id}/context?chapter=${chapter}&pov=${pov.value}`);
+      side.append(grid(projection, pov.selectedOptions[0]?.textContent ?? pov.value));
+    } catch (error) {
+      side.append(el("p", { class: "error", text: error.message }));
+    }
+  }
+
+  // Changing POV changes what may be written, so the grid reloads with it.
+  pov.addEventListener("change", showKnowledge);
 
   const go = el("button", {
     text: "Draft",
     on: {
       click: async () => {
         draft.textContent = "";
-        await stream(`/api/project/${id}/draft`, { chapter, pov, harness: harness.value }, (event) => {
-          if (event.type === "chunk") {
-            draft.textContent += event.text;
-          }
-          if (event.type === "error") {
-            note.textContent = event.text;
-          }
-          if (event.type === "done") {
-            accept.removeAttribute("disabled");
-            note.textContent = `${event.words} words drafted, nothing accepted yet`;
-          }
-        });
+        await stream(`/api/project/${id}/draft`,
+          { chapter, pov: pov.value, harness: harness.value },
+          (event) => {
+            if (event.type === "chunk") {
+              draft.textContent += event.text;
+            }
+            if (event.type === "error") {
+              note.textContent = event.text;
+            }
+            if (event.type === "done") {
+              accept.removeAttribute("disabled");
+              note.textContent = `${event.words} words drafted, nothing accepted yet`;
+            }
+          });
       }
     }
   });
@@ -1320,12 +1357,15 @@ export async function openControlRoom(id, chapter, pov) {
   clear(app);
   app.append(el("div", { class: "room" }, [
     el("section", { class: "prose" }, [
-      el("h2", { text: `${chapter} · POV ${pov}` }),
+      el("h2", { text: chapter }),
+      el("p", { class: "actions" }, [el("label", { text: "POV" }), pov]),
       draft,
       el("p", { class: "actions" }, [harness, go, accept, note])
     ]),
-    grid(projection)
+    side
   ]));
+
+  await showKnowledge();
 }
 ```
 
@@ -1337,6 +1377,7 @@ export async function openControlRoom(id, chapter, pov) {
 .prose #draft { white-space: pre-wrap; min-height: 12rem; border-left: 2px solid var(--rule); padding-left: 1rem; }
 .actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
 .actions #note { color: var(--muted); font-size: 13px; }
+.side { min-width: 0; }
 .knowledge { font: 13px/1.5 "IBM Plex Mono", ui-monospace, monospace; }
 .knowledge h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: .25rem; }
 .knowledge ul { list-style: none; padding: 0; margin: 0 0 1rem; }
