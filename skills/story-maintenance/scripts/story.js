@@ -2654,18 +2654,24 @@ function scanProject(root) {
     continuity: fs2.existsSync(path8.join(projectRoot, "continuity", "state.md")) ? readMarkdown(path8.join(projectRoot, "continuity", "state.md"), projectRoot) : null
   };
 }
-function validateProject(root) {
+function validateProjectStructure(root) {
   const projectRoot = path8.resolve(root);
   const errors = [];
-  const warnings = [];
   for (const requiredPath of REQUIRED_PATHS) {
     if (!fs2.existsSync(path8.join(projectRoot, requiredPath))) {
       errors.push(`Missing required path: ${requiredPath}`);
     }
   }
-  if (errors.length > 0) {
-    return { ok: false, errors, warnings };
+  return { ok: errors.length === 0, errors, warnings: [] };
+}
+function validateProject(root) {
+  const projectRoot = path8.resolve(root);
+  const structure = validateProjectStructure(projectRoot);
+  if (!structure.ok) {
+    return structure;
   }
+  const errors = [];
+  const warnings = [];
   const project = scanProject(projectRoot);
   validateStoryFrontmatter(project, errors);
   validateIndexFrontmatter(project, errors);
