@@ -6,6 +6,7 @@ import { tokenMatches } from "./token.js";
 import { checkProjectContinuity, contextProjection, projectReport, scanProject, validateLinks, validateProject } from "../src/story.js";
 import { harnessNames } from "./harness.js";
 import { listProjects, registerRoot, resolveRoot } from "./projects.js";
+import { runDraft } from "./draft.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, "public");
@@ -153,6 +154,35 @@ export function createServer({ token, registryDir = HERE }) {
         // The engine refusing the request is 400.
         sendJson(response, 400, { error: error.message });
       }
+      return;
+    }
+
+    const draft = url.pathname.match(/^\/api\/project\/([a-f0-9]+)\/draft$/);
+    if (draft && request.method === "POST") {
+      readBody(request).then(async (body) => {
+        let root;
+        try {
+          root = resolveRoot(registryDir, draft[1]);
+        } catch (error) {
+          sendJson(response, 404, { error: error.message });
+          return;
+        }
+
+        // Line-delimited JSON rather than SSE: EventSource issues a GET and
+        // cannot carry the token header.
+        response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8" });
+
+        for await (const event of runDraft({
+          root,
+          chapter: String(body.chapter ?? ""),
+          pov: String(body.pov ?? ""),
+          harness: String(body.harness ?? "")
+        })) {
+          response.write(`${JSON.stringify(event)}\n`);
+        }
+
+        response.end();
+      });
       return;
     }
 

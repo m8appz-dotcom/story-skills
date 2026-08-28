@@ -222,3 +222,77 @@ describe("context endpoint", () => {
     expect((await get(`/api/project/${id}/context?chapter=chapter-99&pov=nobody`, TOKEN)).status).toBe(400);
   });
 });
+
+import { runDraft } from "../ui/draft.js";
+import { EventEmitter } from "node:events";
+import { Readable, Writable } from "node:stream";
+import fsNode from "node:fs";
+import pathNode from "node:path";
+
+function stubSpawn(lines, { code = 0, stderr = [] } = {}) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = Readable.from(lines.map((line) => `${JSON.stringify(line)}\n`));
+    child.stderr = Readable.from(stderr);
+    child.stdin = new Writable({ write(chunk, encoding, done) { done(); } });
+    child.stdout.on("end", () => setImmediate(() => child.emit("close", code)));
+    return child;
+  };
+}
+
+async function collect(options) {
+  const events = [];
+  for await (const event of runDraft(options)) {
+    events.push(event);
+  }
+  return events;
+}
+
+describe("drafting", () => {
+  test("writes prose into the candidate and never into frontmatter", async () => {
+    const { root } = await seeded("Draft Novel", (dir) => {
+      createEntity(dir, { kind: "character", name: "Chimpu", role: "protagonist" });
+      createEntity(dir, { kind: "chapter", name: "The Three Places", number: 11, pov: "chimpu" });
+    });
+
+    const events = await collect({
+      root, chapter: "chapter-11", pov: "chimpu", harness: "codex",
+      spawnImpl: stubSpawn([
+        { type: "item", item: { type: "agent_message", text: "The light went." } },
+        { type: "usage", usage: {} }
+      ])
+    });
+
+    const done = events.find((event) => event.type === "done");
+    expect(done).toBeDefined();
+
+    const written = fsNode.readFileSync(done.candidateFile, "utf8");
+    expect(written).toContain("The light went.");
+    // The frontmatter block must be exactly what the scaffold wrote.
+    expect(written.split("---")[1]).not.toContain("The light went.");
+  });
+
+  test("surfaces a harness that fails instead of reporting an empty draft", async () => {
+    const { root } = await seeded("Failing Harness", (dir) => {
+      createEntity(dir, { kind: "character", name: "Chimpu", role: "protagonist" });
+      createEntity(dir, { kind: "chapter", name: "One", number: 1, pov: "chimpu" });
+    });
+
+    const events = await collect({
+      root, chapter: "chapter-01", pov: "chimpu", harness: "gemini",
+      spawnImpl: stubSpawn([], { code: 1, stderr: ["IneligibleTierError: not eligible\n"] })
+    });
+
+    expect(events.find((event) => event.type === "error").text).toContain("IneligibleTierError");
+  });
+
+  test("refuses a harness that is not in the table", async () => {
+    const { root } = await seeded("Bad Harness", (dir) => {
+      createEntity(dir, { kind: "chapter", name: "One", number: 1 });
+    });
+
+    const events = await collect({ root, chapter: "chapter-01", pov: "", harness: "curl" });
+    expect(events[0].type).toBe("error");
+    expect(events[0].text).toContain("Unknown harness: curl");
+  });
+});
