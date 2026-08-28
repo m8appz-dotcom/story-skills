@@ -1,0 +1,12 @@
+:root { --ground: #faf8f4; --raised: #f3ece0; --ink: #22201c; --muted: #8a8377; --rule: #ddd6c8; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --ground: #171614; --raised: #1f1d1a; --ink: #e8e3d8; --muted: #8f887c; --rule: #3a3630; }
+}
+body { background: var(--ground); color: var(--ink); font: 15px/1.55 "IBM Plex Serif", Georgia, serif; margin: 2rem; }
+h1 { font-size: 1.4rem; letter-spacing: -.01em; }
+table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid var(--rule); }
+th { font: 500 11px/1 "IBM Plex Mono", ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: var(--raised); cursor: pointer; }
+.error { color: #a33; font-size: 13px; }
